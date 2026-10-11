@@ -27,7 +27,22 @@ whisp_sources = [
   'whisp/stats.py',
 ]
 
+whisp_dialogs_sources = [
+  'whisp/dialogs/__init__.py',
+  'whisp/dialogs/whats_new.py',
+  'whisp/dialogs/preferences.py',
+  'whisp/dialogs/shortcuts.py',
+]
+
+whisp_editor_helpers_sources = [
+  'whisp/editor_helpers/__init__.py',
+  'whisp/editor_helpers/editor_lists.py',
+  'whisp/editor_helpers/editor_expansions.py',
+]
+
 pkgdatadir = join_paths(get_option('prefix'), get_option('datadir'), meson.project_name())
 moduledir = join_paths(pkgdatadir, 'whisp')
 
 install_data(whisp_sources, install_dir: moduledir)
+install_data(whisp_dialogs_sources, install_dir: join_paths(moduledir, 'dialogs'))
+install_data(whisp_editor_helpers_sources, install_dir: join_paths(moduledir, 'editor_helpers'))
