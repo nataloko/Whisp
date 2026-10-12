@@ -29,3 +29,10 @@ test('Test editor.py',
   args: [join_paths(meson.current_source_dir(), 'test_editor.py')],
   env: ['PYTHONPATH=' + join_paths(meson.project_source_root(), 'src')]
 )
+
+test('Test preferences.py',
+  python,
+  args: [join_paths(meson.current_source_dir(), 'test_preferences.py')],
+  env: ['PYTHONPATH=' + join_paths(meson.project_source_root(), 'src')]
+)
+
