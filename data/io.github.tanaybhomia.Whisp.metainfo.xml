@@ -23,15 +23,15 @@
     <value key="flathub::brand::primary">#00cccc</value>
   </custom>
 
-  <requires>
-    <display_length compare="ge">360</display_length>
-  </requires>
-
-  <recommends>
+  <supports>
     <control>pointing</control>
     <control>keyboard</control>
     <control>touch</control>
-  </recommends>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
 
   <description>
     <p>Whisp is a gesture-driven note-taking application designed for GNOME.</p>

@@ -44,7 +44,7 @@ class WhispWindow(Adw.ApplicationWindow):
             width = 360
             height = 500
         self.set_default_size(int(width), int(height))
-        self.set_size_request(300, 300)
+        self.set_size_request(360, 400)
         if config.get("is_maximized"):
             self.maximize()
             
