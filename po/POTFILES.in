@@ -1,4 +1,10 @@
 data/io.github.tanaybhomia.Whisp.desktop.in
-src/whisp/main.py
+src/whisp/dialogs/about.py
+src/whisp/dialogs/export.py
+src/whisp/dialogs/preferences.py
+src/whisp/dialogs/shortcuts.py
+src/whisp/dialogs/whats_new.py
 src/whisp/editor.py
+src/whisp/editor_helpers/editor_expansions.py
+src/whisp/main.py
 src/whisp/window.py
