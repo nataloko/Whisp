@@ -67,6 +67,24 @@ class TestPreferences(unittest.TestCase):
         dialog = show_preferences_dialog(self.mock_window)
         self.assertIsInstance(dialog, PreferencesDialog)
 
+    def test_shortcut_reset(self):
+        mock_btn = MagicMock()
+        mock_shortcut_label = MagicMock()
+        self.dialog.on_shortcut_reset(mock_btn, "win.new-note", mock_shortcut_label, mock_btn)
+        mock_btn.set_visible.assert_called_with(False)
+        mock_shortcut_label.set_accelerator.assert_called_once()
+
+    def test_gtk_shortcut_label_fallback(self):
+        import whisp.dialogs.preferences as pref_mod
+        from gi.repository import Gtk
+        orig_cls = pref_mod.ShortcutLabel
+        try:
+            pref_mod.ShortcutLabel = Gtk.ShortcutLabel
+            dialog = PreferencesDialog(self.mock_window)
+            self.assertIsInstance(dialog, Adw.PreferencesDialog)
+        finally:
+            pref_mod.ShortcutLabel = orig_cls
+
 
 if __name__ == "__main__":
     unittest.main()

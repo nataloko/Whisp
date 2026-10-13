@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 _ = gettext.gettext
 
+ShortcutLabel = getattr(Adw, "ShortcutLabel", None) or Gtk.ShortcutLabel
+
 
 class ThemeSnippet(Gtk.ToggleButton):
     def __init__(self, theme_id, group=None):
@@ -348,7 +350,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 
                 row = Adw.ActionRow(title=label)
                 
-                shortcut_label = Adw.ShortcutLabel(accelerator=display_accel)
+                shortcut_label = ShortcutLabel(accelerator=display_accel)
                 shortcut_label.set_disabled_text(_("Disabled"))
                 shortcut_label.set_valign(Gtk.Align.CENTER)
                 
@@ -714,5 +716,11 @@ def show_preferences_dialog(parent_window: "WhispWindow") -> PreferencesDialog:
     if isinstance(parent_window, Gtk.Widget):
         dialog.present(parent_window)
     else:
-        dialog.present()
+        try:
+            dialog.present()
+        except (TypeError, Exception):
+            try:
+                dialog.present(None)
+            except Exception:
+                pass
     return dialog
