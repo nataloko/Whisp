@@ -356,7 +356,7 @@ class WhispWindow(Adw.ApplicationWindow):
         n_pages = self.carousel.get_n_pages()
         if n_pages == 0:
             return
-        current = int(round(self.carousel.get_position()))
+        current = self.get_current_page_index()
         if current < n_pages - 1:
             editor = cast(NoteEditor, self.carousel.get_nth_page(current + 1))
             self.carousel.scroll_to(editor, True)
@@ -368,7 +368,7 @@ class WhispWindow(Adw.ApplicationWindow):
         n_pages = self.carousel.get_n_pages()
         if n_pages == 0:
             return
-        current = int(round(self.carousel.get_position()))
+        current = self.get_current_page_index()
         if current > 0:
             editor = cast(NoteEditor, self.carousel.get_nth_page(current - 1))
             self.carousel.scroll_to(editor, True)
@@ -402,7 +402,7 @@ class WhispWindow(Adw.ApplicationWindow):
 
     def _wheel_change_note(self, direction):
         n_pages = self.carousel.get_n_pages()
-        target = int(round(self.carousel.get_position())) + direction
+        target = self.get_current_page_index() + direction
         if target < 0 or target >= n_pages:
             return
         editor = cast(NoteEditor, self.carousel.get_nth_page(target))
@@ -456,7 +456,7 @@ class WhispWindow(Adw.ApplicationWindow):
             return
             
         try:
-            current_page_idx = int(round(self.carousel.get_position()))
+            current_page_idx = self.get_current_page_index()
             if current_page_idx < 0 or current_page_idx >= self.carousel.get_n_pages():
                 return
                 
@@ -784,7 +784,7 @@ class WhispWindow(Adw.ApplicationWindow):
         if n_pages == 0:
             return
 
-        current_page_idx = int(round(self.carousel.get_position()))
+        current_page_idx = self.get_current_page_index()
         editor = cast(NoteEditor, self.carousel.get_nth_page(current_page_idx))
 
         # Don't allow deleting an already empty note (prevents app locking bug)
@@ -877,7 +877,7 @@ class WhispWindow(Adw.ApplicationWindow):
     def on_page_changed(self, carousel, index):
         tracker.increment("total_swipes")
         self.update_title()
-        editor = carousel.get_nth_page(int(round(index)))
+        editor = carousel.get_nth_page(int(round(float(index))))
         if editor:
             fname = editor.file_path.name
             is_pinned = self.metadata.get(fname, {}).get("pinned", False)
@@ -897,11 +897,15 @@ class WhispWindow(Adw.ApplicationWindow):
             else:
                 GLib.idle_add(lambda: [editor.textview.grab_focus(), False][-1])
 
+    def get_current_page_index(self) -> int:
+        """Return the integer index of the current carousel page."""
+        return int(round(float(self.carousel.get_position())))
+
     def on_editor_title_changed(self, editor):
         self.ensure_empty_note_at_end()
         if self.carousel.get_n_pages() == 0:
             return
-        current_page_idx = int(round(self.carousel.get_position()))
+        current_page_idx = self.get_current_page_index()
         if current_page_idx < self.carousel.get_n_pages():
             current_editor = self.carousel.get_nth_page(current_page_idx)
             if editor == current_editor:
@@ -914,8 +918,7 @@ class WhispWindow(Adw.ApplicationWindow):
         n_pages = self.carousel.get_n_pages()
         if n_pages == 0:
             return None
-        idx = int(round(self.carousel.get_position()))
-        idx = max(0, min(idx, n_pages - 1))
+        idx = max(0, min(self.get_current_page_index(), n_pages - 1))
         return cast(NoteEditor, self.carousel.get_nth_page(idx))
 
     def on_search_shortcut(self, action=None, param=None):
@@ -978,7 +981,7 @@ class WhispWindow(Adw.ApplicationWindow):
         config.set("window_height", self.get_height())
         config.set("is_maximized", self.is_maximized())
         
-        current_page_idx = int(round(self.carousel.get_position()))
+        current_page_idx = self.get_current_page_index()
         if current_page_idx < self.carousel.get_n_pages():
             editor = cast(NoteEditor, self.carousel.get_nth_page(current_page_idx))
             config.set("last_active_note", str(editor.file_path))
