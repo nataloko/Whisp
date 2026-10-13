@@ -220,14 +220,8 @@ class WhatsNewWindow(Adw.Window):
         donate_btn.add_css_class("whisp-support-btn")
         donate_btn.set_halign(Gtk.Align.CENTER)
         
-        def on_donate_click(btn):
-            if hasattr(Gtk, "UriLauncher"):
-                launcher = Gtk.UriLauncher.new("https://tanaybhomia.github.io/Whisp/donate.html")
-                launcher.launch(self, None, None)
-            else:
-                Gio.AppInfo.launch_default_for_uri("https://tanaybhomia.github.io/Whisp/donate.html", None)
-                
-        donate_btn.connect("clicked", on_donate_click)
+        from whisp.dialogs.about import open_donate_url
+        donate_btn.connect("clicked", lambda btn: open_donate_url(self))
         
         support_card.append(support_title)
         support_card.append(support_msg)

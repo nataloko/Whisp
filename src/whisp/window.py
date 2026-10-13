@@ -9,23 +9,21 @@ from typing import cast, Any, TYPE_CHECKING
 from gi.repository import Gtk, Adw, Gdk, Gio, GLib, Pango
 from whisp.config import config, DATA_DIR, TRASH_DIR
 from whisp.editor import NoteEditor
-from whisp.notes import NoteIndex
 from whisp.stats import tracker
-from whisp.dialogs import WhatsNewWindow, show_shortcuts_dialog, show_preferences_dialog
+from whisp.search_popover import NoteSearchPopover, NoteListBoxRow
+from whisp.dialogs import (
+    WhatsNewWindow,
+    show_shortcuts_dialog,
+    show_preferences_dialog,
+    show_about_dialog,
+    open_donate_url,
+    get_latest_release_info,
+    get_dynamic_version,
+    export_note,
+)
 
 if TYPE_CHECKING:
     from whisp.main import WhispApp
-
-class NoteListBoxRow(Gtk.ListBoxRow):
-    file_path: Any
-    match_index: Any
-    match_term: str
-
-    def __init__(self, **kwargs: Any):
-        super().__init__(**kwargs)
-        self.file_path = None
-        self.match_index = None
-        self.match_term = ""
 
 try:
     locale.setlocale(locale.LC_ALL, '')
@@ -35,7 +33,6 @@ except locale.Error:
 _ = gettext.gettext
 
 class WhispWindow(Adw.ApplicationWindow):
-    PAGE_SIZE = 20  # result rows rendered per page; more load as the user scrolls
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -224,43 +221,10 @@ class WhispWindow(Adw.ApplicationWindow):
         self.search_btn.set_icon_name("system-search-symbolic")
         self.header_bar.pack_end(self.search_btn)
 
-        self.popover = Gtk.Popover()
-        # Non-modal so the note stays scrollable while searching; closed via Escape.
-        self.popover.set_autohide(False)
+        self.popover = NoteSearchPopover(self)
+        self.search_entry = self.popover.search_entry
+        self.note_listbox = self.popover.note_listbox
         self.search_btn.set_popover(self.popover)
-        self.popover.connect("notify::visible", self.on_popover_visible)
-
-        popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        popover_box.set_margin_top(12)
-        popover_box.set_margin_bottom(12)
-        popover_box.set_margin_start(12)
-        popover_box.set_margin_end(12)
-        popover_box.set_size_request(320, -1)
-        self.popover.set_child(popover_box)
-
-        self.search_entry = Gtk.SearchEntry()
-        self.search_timeout_id = 0
-        self._row_iter = None
-        self.note_index = NoteIndex()
-        self.search_entry.connect("search-changed", self.on_search_changed)
-        self.search_entry.connect("stop-search", lambda e: self.popover.popdown())
-        popover_box.append(self.search_entry)
-
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_min_content_height(200)
-        scrolled.set_min_content_width(296)
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.search_scrolled = scrolled
-        # Infinite scroll: load more on reaching the bottom; prefetch before it.
-        scrolled.connect("edge-reached", self.on_search_edge_reached)
-        scrolled.get_vadjustment().connect("value-changed", self.on_search_scrolled)
-        popover_box.append(scrolled)
-
-        self.note_listbox = Gtk.ListBox()
-        self.note_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.note_listbox.add_css_class("boxed-list")
-        self.note_listbox.connect("row-activated", self.on_note_row_activated)
-        scrolled.set_child(self.note_listbox)
 
 
         # Hamburger menu
@@ -370,292 +334,21 @@ class WhispWindow(Adw.ApplicationWindow):
             manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
 
     def _get_latest_release_info(self, last_seen="0.0.0", only_latest=False, as_list=False):
-        import xml.etree.ElementTree as ET
-        from pathlib import Path
-        try:
-            meta_path = Path("/app/share/metainfo/io.github.tanaybhomia.Whisp.metainfo.xml")
-            if not meta_path.exists():
-                meta_path = Path(__file__).parent.parent.parent / "data" / "io.github.tanaybhomia.Whisp.metainfo.xml"
-                
-            tree = ET.parse(meta_path)
-            root = tree.getroot()
-            releases = root.find("releases")
-            
-            def parse_ver(v_str):
-                try:
-                    return tuple(map(int, v_str.split('.')))
-                except Exception:
-                    return (0, 0, 0)
-                    
-            last_seen_tuple = parse_ver(last_seen)
-            
-            def get_inner_markup(elem):
-                raw = ET.tostring(elem, encoding="unicode", method="xml").strip()
-                inner = re.sub(r'^<[^>]+>', '', raw)
-                inner = re.sub(r'</[^>]+>$', '', inner).strip()
-                return inner
-            
-            if releases is not None:
-                description_text = ""
-                latest_version = "Unknown"
-                releases_list = []
-                
-                for i, release in enumerate(releases.findall("release")):
-                    version = release.attrib.get("version", "Unknown")
-                    date = release.attrib.get("date", "")
-                    if i == 0:
-                        latest_version = version
-                        
-                    ver_tuple = parse_ver(version)
-                    if ver_tuple <= last_seen_tuple or (only_latest and i > 0):
-                        break
-                        
-                    release_desc = ""
-                    if not as_list:
-                        description_text += f"<span size='large' weight='bold'>v{version}</span>\n"
-                    
-                    features = []
-                    bug_fixes = []
-                    current_cat = None
-                    
-                    desc_node = release.find("description")
-                    raw_xml = ""
-                    if desc_node is not None:
-                        raw_xml = "".join(ET.tostring(child, encoding="unicode").strip() for child in desc_node)
-                        for child in desc_node:
-                            if child.tag == "p":
-                                text = "".join(child.itertext()).strip()
-                                lower_text = text.lower()
-                                if "feature" in lower_text:
-                                    current_cat = "features"
-                                elif any(k in lower_text for k in ["fix", "hotfix", "bug", "maintenance"]):
-                                    current_cat = "bug_fixes"
-                                    
-                                if text:
-                                    escaped = GLib.markup_escape_text(text)
-                                    if child.find("em") is not None:
-                                        release_desc += f"<b>{escaped}</b>\n\n"
-                                    else:
-                                        release_desc += f"{escaped}\n\n"
-                            elif child.tag == "ul":
-                                for li in child.findall("li"):
-                                    li_text = "".join(li.itertext()).strip()
-                                    if not li_text:
-                                        continue
-                                    lower_li = li_text.lower()
-                                    if current_cat == "bug_fixes" or any(k in lower_li for k in ["fix", "crash", "resolved", "bug", "stability"]):
-                                        bug_fixes.append(li_text)
-                                    else:
-                                        features.append(li_text)
-                                        
-                                    if ":" in li_text:
-                                        title, _, rest = li_text.partition(":")
-                                        b_title = GLib.markup_escape_text(title.strip())
-                                        b_rest = GLib.markup_escape_text(rest)
-                                        release_desc += f"• <b>{b_title}:</b>{b_rest}\n"
-                                    else:
-                                        escaped = GLib.markup_escape_text(li_text)
-                                        release_desc += f"• {escaped}\n"
-                                release_desc += "\n"
-                                
-                    releases_list.append({
-                        "version": version,
-                        "date": date,
-                        "raw_xml": raw_xml,
-                        "description": release_desc.strip(),
-                        "features": features,
-                        "bug_fixes": bug_fixes
-                    })
-                    description_text += release_desc
-                    
-                if as_list:
-                    return latest_version, releases_list
-                return latest_version, description_text.strip()
-        except Exception:
-            pass
-        if as_list:
-            return "Unknown", []
-        return "Unknown", ""
+        return get_latest_release_info(last_seen=last_seen, only_latest=only_latest, as_list=as_list)
 
     def _get_dynamic_version(self):
-        version, _desc = self._get_latest_release_info(only_latest=True)
-        return version
-        
-    def on_export_note(self, action, param):
+        return get_dynamic_version()
+
+    def on_export_note(self, action=None, param=None):
         editor = self.get_current_editor()
-        if not editor:
-            return
-            
-        dialog = Gtk.FileDialog()
-        dialog.set_title(_("Export Note"))
-        
-        # Determine initial name based on note content
-        title = "note"
-        start, end = editor.buffer.get_bounds()
-        text = editor.buffer.get_text(start, end, False)
-        for line in text.split('\n'):
-            line = line.strip()
-            if line:
-                # Strip markdown headers and non-alphanumeric chars for a clean filename
-                import re
-                clean_line = re.sub(r'[^a-zA-Z0-9\s]', '', line).strip()
-                words = clean_line.split()
-                if words:
-                    title = "-".join(words[:5]).lower()
-                break
-                
-        dialog.set_initial_name(f"{title}.md")
-        
-        filters = Gio.ListStore.new(Gtk.FileFilter)
-        md_filter = Gtk.FileFilter()
-        md_filter.set_name(_("Markdown File"))
-        md_filter.add_pattern("*.md")
-        filters.append(md_filter)
-        dialog.set_filters(filters)
-        
-        def on_save_response(dialog, result):
-            try:
-                file = dialog.save_finish(result)
-                if file:
-                    start, end = editor.buffer.get_bounds()
-                    content = editor.buffer.get_text(start, end, False).encode('utf-8')
-                    file.replace_contents(
-                        content,
-                        None,
-                        False,
-                        Gio.FileCreateFlags.NONE,
-                        None
-                    )
-                    toast = Adw.Toast.new(_("Note exported successfully"))
-                    self.toast_overlay.add_toast(toast)
-            except GLib.Error as e:
-                if "dismissed" not in str(e).lower():
-                    print(f"File save error: {e}")
-            except Exception as e:
-                print(f"Error writing to file: {e}")
-                
-        dialog.save(self, None, on_save_response)
+        if editor:
+            export_note(self, editor, getattr(self, "toast_overlay", None))
 
-    def on_about(self, action, param, open_page=None):
-        version = self._get_dynamic_version()
-        app = self.get_application() or Gio.Application.get_default()
-        app_id = app.get_application_id() if app else ""
-        is_dev = (bool(app_id) and app_id.endswith(".Devel")) or "--dev" in sys.argv
-        
-        icon_name = "io.github.tanaybhomia.Whisp.Devel" if is_dev else "io.github.tanaybhomia.Whisp"
-        app_name = "Whisp (Development)" if is_dev else "Whisp"
+    def on_about(self, action=None, param=None, open_page=None):
+        show_about_dialog(self, open_page=open_page)
 
-        about = Adw.AboutDialog(
-            application_name=app_name,
-            application_icon=icon_name,
-            developer_name="Tanay Bhomia",
-            developers=["Tanay Bhomia"],
-            version=version,
-            website="https://tanaybhomia.github.io/Whisp/",
-            issue_url="https://github.com/tanaybhomia/Whisp/issues",
-            support_url="https://github.com/tanaybhomia/Whisp/discussions",
-            license_type=Gtk.License.GPL_3_0
-        )
-        translator_credits = _("translator-credits")
-        if translator_credits == "translator-credits":
-            translator_credits = (
-                "Asier Saratsua Garmendia <asiersarasua@ni.eus>\n"
-                "Florian Obernberger <florian.obernberger@gmail.com>\n"
-                "Guillaume Bernard <contact@guillaume-bernard.fr>\n"
-                "Ouiplala <ouiplala@laposte.net>\n"
-                "Baurzhan Muftakhidinov <baurthefirst@gmail.com>\n"
-                "Martin Srebotnjak <miles@filmsi.net>\n"
-                "Anders Jonsson <anders.jonsson@norsjovallen.se>\n"
-                "Yuri Chornoivan <yurchor@ukr.net>"
-            )
-        about.set_translator_credits(translator_credits)
-        about.add_credit_section(_("Icon by"), ["gnoman"])
-        about.add_acknowledgement_section(None, ["arewelibadwaitayet https://arewelibadwaitayet.com/"])
-        
-        if hasattr(about, "add_other_app"):
-            about.add_other_app(
-                "io.github.tanaybhomia.DeepDive",
-                _("Deep Dive"),
-                _("Stay focused with strict limits")
-            )
-        
-        about.add_link(_("Manual"), "https://tanaybhomia.github.io/Whisp/manual.html")
-        about.add_link(_("Translate"), "https://l10n.gnome.org/module/whisp/")
-        about.add_link(_("Donate"), "https://tanaybhomia.github.io/Whisp/donate.html")
-        
-        import os
-        import platform
-        
-        is_flatpak = "FLATPAK_ID" in os.environ
-        os_name = "Unknown OS"
-        try:
-            with open("/etc/os-release") as f:
-                for line in f:
-                    if line.startswith("PRETTY_NAME="):
-                        os_name = line.split("=")[1].strip().strip('"')
-                        break
-        except Exception:
-            pass
-            
-        debug_info = []
-        debug_info.append(f"os: {os_name}")
-        debug_info.append(f"prefix: {sys.prefix}")
-        debug_info.append(f"flatpak: {str(is_flatpak).lower()}")
-        debug_info.append(f"version: {version}")
-        debug_info.append(f"python: {platform.python_version()}")
-        debug_info.append(f"gtk: {Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}")
-        
-        try:
-            debug_info.append(f"libadwaita: {Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}")
-        except Exception:
-            pass
-            
-        try:
-            import pytesseract
-            debug_info.append(f"tesseract: {pytesseract.get_tesseract_version()}")
-        except Exception:
-            pass
-            
-        try:
-            from PIL import Image
-            debug_info.append(f"pillow: {Image.__version__}")
-        except Exception:
-            pass
-            
-        about.set_debug_info("\n".join(debug_info))
-        
-        
-        if hasattr(about, "set_release_notes"):
-            _ver, releases_list = self._get_latest_release_info(last_seen="0.0.0", only_latest=True, as_list=True)
-            if releases_list:
-                rel = releases_list[0]
-                about.set_release_notes_version(rel.get("version", version))
-                raw_xml = rel.get("raw_xml", "")
-                if raw_xml:
-                    about.set_release_notes(raw_xml)
-                
-        about.present(self)
-        if open_page:
-            def _find_nav(widget):
-                if isinstance(widget, Adw.NavigationView):
-                    return widget
-                child = widget.get_first_child()
-                while child:
-                    res = _find_nav(child)
-                    if res: return res
-                    child = child.get_next_sibling()
-                return None
-                
-            nav = _find_nav(about)
-            if nav:
-                GLib.idle_add(lambda: nav.push_by_tag(open_page) or False)
-
-    def on_donate(self, action, param):
-        if hasattr(Gtk, "UriLauncher"):
-            launcher = Gtk.UriLauncher.new("https://tanaybhomia.github.io/Whisp/donate.html")
-            launcher.launch(self, None, None)
-        else:
-            Gio.AppInfo.launch_default_for_uri("https://tanaybhomia.github.io/Whisp/donate.html", None)
+    def on_donate(self, action=None, param=None):
+        open_donate_url(self)
 
     def on_nav_next(self, action=None, param=None):
         if action is not None:
@@ -1225,211 +918,29 @@ class WhispWindow(Adw.ApplicationWindow):
         idx = max(0, min(idx, n_pages - 1))
         return cast(NoteEditor, self.carousel.get_nth_page(idx))
 
-    def on_search_shortcut(self, action, param):
+    def on_search_shortcut(self, action=None, param=None):
         self.search_btn.set_active(True)
-
-    def on_popover_visible(self, popover, param):
-        if popover.get_visible():
-            self.search_entry.set_text("")
-            self.populate_note_list()
-            self.search_entry.grab_focus()
-        else:
-            if self.search_timeout_id:
-                GLib.source_remove(self.search_timeout_id)
-                self.search_timeout_id = 0
-            for i in range(self.carousel.get_n_pages()):
-                editor = cast(NoteEditor, self.carousel.get_nth_page(i))
-                editor.set_search_highlight("")
-            editor = self.get_current_editor()
-            if editor:
-                editor.textview.grab_focus()
 
     def open_search(self, terms):
         """Open the in-app search popover, pre-filled with the given terms."""
-        if not self.get_mapped():
-            def on_map(w):
-                w.disconnect(handler_id)
-                self.open_search(terms)
-            handler_id = self.connect("map", on_map)
-            return
-        self.search_btn.set_active(True)
-        self.search_entry.set_text(terms)
+        self.popover.open_search(terms)
 
-    def _build_snippet_markup(self, content, idx, search_text):
-        # Asymmetric context: keep the match near the start of the snippet so
-        # the highlight stays visible before the label ellipsizes at the end.
-        pre, post = 12, 60
-        start = max(0, idx - pre)
-        end = min(len(content), idx + len(search_text) + post)
-        match_offset = idx - start
+    def open_note_at_match(self, file_path, match_term="", match_index=None):
+        target: NoteEditor | None = None
+        for i in range(self.carousel.get_n_pages()):
+            editor = cast(NoteEditor, self.carousel.get_nth_page(i))
+            if editor.file_path == file_path:
+                self.carousel.scroll_to(editor, True)
+                target = editor
+                break
 
-        snippet = content[start:end]
-        before = re.sub(r'\s+', ' ', snippet[:match_offset])
-        matched = re.sub(r'\s+', ' ', snippet[match_offset:match_offset + len(search_text)])
-        after = re.sub(r'\s+', ' ', snippet[match_offset + len(search_text):])
+        if target is None:
+            target = self.add_note(file_path)
 
-        prefix = "…" if start > 0 else ""
-        suffix = "…" if end < len(content) else ""
+        if match_index is not None and target:
+            target.scroll_to_match(match_term, match_index)
 
-        return (
-            GLib.markup_escape_text(prefix + before)
-            + '<span background="#f9f06b" color="#000000">'
-            + GLib.markup_escape_text(matched)
-            + '</span>'
-            + GLib.markup_escape_text(after + suffix)
-        )
-
-    def _iter_row_descriptors(self, files, search_text):
-        # Lazy: descriptors are pulled by the page renderer, not built up front.
-        for f in files:
-            entry = self.note_index.load(f)
-            if entry is None or entry["blank"]:
-                continue
-            title, tag_str, content = entry["title"], entry["tag_str"], entry["content"]
-            if not search_text:
-                yield {"file": f, "plain": True, "title": title, "tag_str": tag_str}
-                continue
-            if search_text not in entry["low_content"]:
-                continue
-            n = 0
-            for idx in self.note_index.iter_body_offsets(entry, search_text):
-                yield {
-                    "file": f, "content": content, "idx": idx, "occurrence": n,
-                    "search": search_text,
-                    "title": title if n == 0 else None,
-                    "tag_str": tag_str if n == 0 else None,
-                }
-                n += 1
-            if n == 0:
-                # Match only in the title/tags line, not the body.
-                yield {"file": f, "plain": True, "title": title, "tag_str": tag_str}
-
-    def populate_note_list(self, search_text=""):
-        # Clear existing rows
-        while child := self.note_listbox.get_first_child():
-            self.note_listbox.remove(child)
-
-        search_text = search_text.lower()
-        files = sorted(DATA_DIR.glob("*.md"), key=lambda f: os.path.getmtime(f) if f.exists() else 0, reverse=True)
-        # Realise widgets one page at a time to keep the UI responsive.
-        self._row_iter = self._iter_row_descriptors(files, search_text)
-        self._render_next_page()
-
-    def _render_next_page(self):
-        if self._row_iter is None:
-            return
-        count = 0
-        for d in self._row_iter:
-            self.note_listbox.append(self._row_from_descriptor(d))
-            count += 1
-            if count >= self.PAGE_SIZE:
-                return
-        self._row_iter = None  # exhausted
-
-    def _row_from_descriptor(self, d):
-        if d.get("plain"):
-            row = self._make_note_row(d["file"])
-            self._append_header(row.get_child(), d["title"], d["tag_str"])
-            return row
-        return self._make_snippet_row(
-            d["file"], d["content"], d["idx"], d["occurrence"], d["search"],
-            title=d["title"], tag_str=d["tag_str"],
-        )
-
-    def _append_header(self, vbox, title, tag_str):
-        title_label = Gtk.Label(label=title, xalign=0)
-        title_label.set_ellipsize(Pango.EllipsizeMode.END)
-        title_label.set_max_width_chars(32)
-        vbox.append(title_label)
-        if tag_str:
-            tag_label = Gtk.Label(label=tag_str, xalign=0)
-            tag_label.add_css_class("dim-label")
-            tag_label.set_ellipsize(Pango.EllipsizeMode.END)
-            tag_label.set_max_width_chars(32)
-            vbox.append(tag_label)
-
-    def _make_note_row(self, file_path, indent=False):
-        row = NoteListBoxRow()
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        vbox.set_margin_start(28 if indent else 12)
-        vbox.set_margin_end(12)
-        vbox.set_margin_top(8)
-        vbox.set_margin_bottom(8)
-        row.set_child(vbox)
-        row.file_path = file_path
-        row.match_index = None
-        row.match_term = ""
-        return row
-
-    def _make_snippet_row(self, f, content, idx, occurrence_index, search_text, title=None, tag_str=None):
-        # title/tag_str only on a note's first match; the rest are indented.
-        row = self._make_note_row(f, indent=title is None)
-        vbox = cast(Gtk.Box, row.get_child())
-        if vbox:
-            if title is not None:
-                self._append_header(vbox, title, tag_str)
-
-            snippet_label = Gtk.Label(xalign=0)
-            snippet_label.set_markup(self._build_snippet_markup(content, idx, search_text))
-            snippet_label.add_css_class("dim-label")
-            snippet_label.set_ellipsize(Pango.EllipsizeMode.END)
-            snippet_label.set_max_width_chars(32)
-            snippet_label.set_wrap(False)
-            vbox.append(snippet_label)
-
-        # Navigate by occurrence index (the buffer can differ from disk).
-        row.match_index = occurrence_index
-        row.match_term = search_text
-        return row
-
-    def on_search_edge_reached(self, scrolled, pos):
-        # Backstop in case a fast scroll outruns the prefetch.
-        if pos == Gtk.PositionType.BOTTOM:
-            self._render_next_page()
-
-    def on_search_scrolled(self, vadj):
-        # Prefetch a screenful early so loading stays invisible.
-        if self._row_iter is None:
-            return
-        remaining_below = vadj.get_upper() - (vadj.get_value() + vadj.get_page_size())
-        if remaining_below < vadj.get_page_size():
-            self._render_next_page()
-
-    def on_search_changed(self, entry):
-        # Debounce: each search rereads every note and rebuilds the list.
-        if self.search_timeout_id:
-            GLib.source_remove(self.search_timeout_id)
-        self.search_timeout_id = GLib.timeout_add(150, self._run_search, entry.get_text())
-
-    def _run_search(self, text):
-        self.search_timeout_id = 0
-        self.populate_note_list(text)
-        editor = self.get_current_editor()
-        if editor:
-            editor.set_search_highlight(text)
-        return False
-
-    def on_note_row_activated(self, listbox, row):
-        file_path = getattr(row, 'file_path', None)
-        if file_path:
-            # Check if it's already in the carousel
-            target: NoteEditor | None = None
-            for i in range(self.carousel.get_n_pages()):
-                editor = cast(NoteEditor, self.carousel.get_nth_page(i))
-                if editor.file_path == file_path:
-                    self.carousel.scroll_to(editor, True)
-                    target = editor
-                    break
-
-            if target is None:
-                target = self.add_note(file_path)
-
-            match_index = getattr(row, 'match_index', None)
-            if match_index is not None and target:
-                target.scroll_to_match(getattr(row, 'match_term', ''), match_index)
-
-            self.update_title()
-        self.popover.popdown()
+        self.update_title()
 
     def on_preferences(self, action=None, param=None):
         show_preferences_dialog(self)

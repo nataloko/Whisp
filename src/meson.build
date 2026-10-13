@@ -24,6 +24,7 @@ whisp_sources = [
   'whisp/text_search.py',
   'whisp/notes.py',
   'whisp/search_provider.py',
+  'whisp/search_popover.py',
   'whisp/stats.py',
 ]
 
@@ -32,6 +33,8 @@ whisp_dialogs_sources = [
   'whisp/dialogs/whats_new.py',
   'whisp/dialogs/preferences.py',
   'whisp/dialogs/shortcuts.py',
+  'whisp/dialogs/about.py',
+  'whisp/dialogs/export.py',
 ]
 
 whisp_editor_helpers_sources = [

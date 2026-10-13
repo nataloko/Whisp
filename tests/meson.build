@@ -36,3 +36,17 @@ test('Test preferences.py',
   env: ['PYTHONPATH=' + join_paths(meson.project_source_root(), 'src')]
 )
 
+test('Test about.py',
+  python,
+  args: [join_paths(meson.current_source_dir(), 'test_about.py')],
+  env: ['PYTHONPATH=' + join_paths(meson.project_source_root(), 'src')]
+)
+
+test('Test search_popover.py',
+  python,
+  args: [join_paths(meson.current_source_dir(), 'test_search_popover.py')],
+  env: ['PYTHONPATH=' + join_paths(meson.project_source_root(), 'src')]
+)
+
+
+
