@@ -867,6 +867,9 @@ class WhispWindow(Adw.ApplicationWindow):
         self.current_toast.set_timeout(5)
         self.toast_overlay.add_toast(self.current_toast)
 
+        if getattr(editor, "is_autopaste_active", False):
+            editor.stop_autopaste(silent=True)
+
         self.carousel.remove(editor)
 
         if self.carousel.get_n_pages() == 0:
@@ -878,6 +881,10 @@ class WhispWindow(Adw.ApplicationWindow):
         tracker.increment("total_swipes")
         self.update_title()
         editor = carousel.get_nth_page(int(round(float(index))))
+        for i in range(carousel.get_n_pages()):
+            page = cast(NoteEditor, carousel.get_nth_page(i))
+            if page != editor and getattr(page, "is_autopaste_active", False):
+                page.stop_autopaste(silent=False)
         if editor:
             fname = editor.file_path.name
             is_pinned = self.metadata.get(fname, {}).get("pinned", False)
@@ -977,6 +984,11 @@ class WhispWindow(Adw.ApplicationWindow):
             getattr(self, "set_keep_above")(btn.get_active())
 
     def on_close_request(self, window):
+        for i in range(self.carousel.get_n_pages()):
+            page = cast(NoteEditor, self.carousel.get_nth_page(i))
+            if getattr(page, "is_autopaste_active", False):
+                page.stop_autopaste(silent=True)
+
         config.set("window_width", self.get_width())
         config.set("window_height", self.get_height())
         config.set("is_maximized", self.is_maximized())

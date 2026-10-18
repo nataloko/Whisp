@@ -14,7 +14,7 @@ from whisp.config import config
 from whisp.highlighter import MarkdownHighlighter
 from whisp.text_search import body_match_offsets
 from whisp.stats import tracker
-from whisp.editor_helpers import EditorListMixin, EditorExpansionsMixin, extract_text_from_image, HAS_OCR
+from whisp.editor_helpers import EditorListMixin, EditorExpansionsMixin, EditorPasteMixin, extract_text_from_image, HAS_OCR
 
 try:
     locale.setlocale(locale.LC_ALL, '')
@@ -26,7 +26,7 @@ _ = gettext.gettext
 class AutocompleteRow(Gtk.ListBoxRow):
     cmd_match: str = ""
 
-class NoteEditor(Gtk.Overlay, EditorListMixin, EditorExpansionsMixin):
+class NoteEditor(Gtk.Overlay, EditorListMixin, EditorPasteMixin, EditorExpansionsMixin):
     window: "WhispWindow | None"
 
     def __init__(self, file_path=None, on_title_changed=None):
@@ -353,6 +353,7 @@ class NoteEditor(Gtk.Overlay, EditorListMixin, EditorExpansionsMixin):
                 self.autocomplete_list.remove(child)
                 
             suggestions = [
+                ("::paste", _("Toggle AutoPaste clipboard collector")),
                 ("::count", _("Insert word count of current note")),
                 ("::today", _("Current date")),
                 ("::today(5)", _("Date offset (+/- days)")),
@@ -542,6 +543,9 @@ class NoteEditor(Gtk.Overlay, EditorListMixin, EditorExpansionsMixin):
                 return True
 
         if keyval == Gdk.KEY_Escape:
+            if getattr(self, "is_autopaste_active", False):
+                self.stop_autopaste()
+                return True
             if self.autocomplete_box.get_visible():
                 self.autocomplete_box.set_visible(False)
                 return True
@@ -569,6 +573,8 @@ class NoteEditor(Gtk.Overlay, EditorListMixin, EditorExpansionsMixin):
                     return True
                         
                 if self.handle_expansion("\n"):
+                    return True
+                if self.handle_paste_return():
                     return True
                 return self.handle_return()
             

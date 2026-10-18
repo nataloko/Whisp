@@ -34,10 +34,10 @@ This is the core "wow" feature. It transforms Whisp from a static markdown edito
 ## Phase 3: The Power User Workflows
 These are advanced features relying on background tasks and system-level integrations.
 
-- [ ] **Screenshot to Text (OCR)**
+- [-x] **Screenshot to Text (OCR)**
   - Integrate `tesseract-ocr` into the background.
   - Intercept image paste events (`Ctrl+V` when an image is in the clipboard).
   - Run the image through the OCR engine locally and dump the extracted text directly into the scratchpad.
-- [ ] **Auto Paste Mode**
+- [-x] **Auto Paste Mode**
   - Create a background listener attached to `Gdk.Clipboard`'s `changed` signal.
   - When enabled, automatically capture any text copied anywhere on the system and append/prepend it to the active Whisp note without requiring window focus.

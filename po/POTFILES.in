@@ -6,5 +6,6 @@ src/whisp/dialogs/shortcuts.py
 src/whisp/dialogs/whats_new.py
 src/whisp/editor.py
 src/whisp/editor_helpers/editor_expansions.py
+src/whisp/editor_helpers/editor_paste.py
 src/whisp/main.py
 src/whisp/window.py

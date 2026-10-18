@@ -125,7 +125,10 @@ class EditorExpansionsMixin:
     autocomplete_box: "Gtk.Widget"
     window: "WhispWindow | None"
 
-    def get_root(self) -> "Gtk.Root | None": ...
+    if TYPE_CHECKING:
+        def get_root(self) -> "Gtk.Root | None": ...
+        def start_autopaste(self) -> None: ...
+        def stop_autopaste(self, silent: bool = False) -> None: ...
 
     def handle_expansion(self, insert_char: str) -> bool:
         insert_mark = self.buffer.get_insert()
@@ -316,6 +319,15 @@ class EditorExpansionsMixin:
                 Gio.AppInfo.launch_default_for_uri("https://en.wikipedia.org/wiki/Special:Random", None)
             except Exception as e:
                 print(f"Failed to launch URL: {e}")
+            return True
+
+        if word.lower() == "::paste":
+            self.buffer.delete(word_start, word_end)
+            self.autocomplete_box.set_visible(False)
+            if getattr(self, "is_autopaste_active", False):
+                self.stop_autopaste()
+            else:
+                self.start_autopaste()
             return True
 
         m_simple = re.match(r'^::(uppercase|lowercase|sentence_case|title_case|capitalize_first|remove_quotes|sort_lines_alpha|sort_lines_number|sort_lines_reverse|remove_lines_empty|trim_each_whitespace|dedupe_lines|get_dupes|commas_to_list|lines_to_commas|checked_to_bottom|remove_checked)$', word, re.IGNORECASE)

@@ -33,6 +33,7 @@ class MarkdownHighlighter:
         self.tag_checkbox_checked = self.buffer.create_tag("checkbox_checked", strikethrough=True, foreground="#aaaaaa")
         self.tag_checkbox_icon = self.buffer.create_tag("checkbox_icon", weight=Pango.Weight.BOLD, foreground="#aaaaaa")
         self.tag_list_keyword = self.buffer.create_tag("list_keyword", foreground="#b48ead", weight=Pango.Weight.BOLD, pixels_below_lines=32)
+        self.tag_paste_keyword = self.buffer.create_tag("paste_keyword", foreground="#b48ead", weight=Pango.Weight.BOLD, pixels_below_lines=32)
         
         # Link styling
         self.tag_link = self.buffer.create_tag("link", foreground="#81a1c1", underline=Pango.Underline.SINGLE)
@@ -124,15 +125,18 @@ class MarkdownHighlighter:
         else:
             wysiwyg = config.get("wysiwyg_mode", False)
         
-        # Check if it's a list note
+        # Check if it's a list note or paste note
         start_doc = self.buffer.get_start_iter()
         end_doc = start_doc.copy()
         end_doc.forward_to_line_end()
         first_line = self.buffer.get_text(start_doc, end_doc, False).strip().lower()
         is_list_note = bool(re.match(r'^(#{1,6}\s*)?list(\s*[:\s].*)?$', first_line))
+        is_paste_note = bool(re.match(r'^(#{1,6}\s*)?:?paste(\s*[:\s].*)?$', first_line))
         
         if is_list_note:
             self.buffer.apply_tag(self.tag_list_keyword, start_doc, end_doc)
+        elif is_paste_note:
+            self.buffer.apply_tag(self.tag_paste_keyword, start_doc, end_doc)
         else:
             # Apply headings (e.g. # Heading)
             for m in re.finditer(r'^(#{1,6}\s+)(.*)$', text, re.MULTILINE):
@@ -141,6 +145,13 @@ class MarkdownHighlighter:
                 hash_end = self.buffer.get_iter_at_offset(m.end(1))
                 end_iter = self.buffer.get_iter_at_offset(m.end())
                 
+                heading_content = m.group(2).strip().lower()
+                if re.match(r'^:?paste(\s*[:\s].*)?$', heading_content):
+                    self.buffer.apply_tag(self.tag_paste_keyword, start_iter, end_iter)
+                    if wysiwyg:
+                        apply_invisible(m, 1, outer_match=m)
+                    continue
+
                 if wysiwyg:
                     tag = getattr(self, f"tag_h{level}", self.tag_h1)
                     self.buffer.apply_tag(tag, start_iter, end_iter)
@@ -148,6 +159,12 @@ class MarkdownHighlighter:
                 else:
                     self.buffer.apply_tag(self.tag_hash_plain, start_iter, hash_end)
                     self.buffer.apply_tag(self.tag_heading_plain, hash_end, end_iter)
+
+            # Apply standalone module keywords anywhere in the note (e.g. paste on a new line)
+            for m in re.finditer(r'^(?:\s*):?paste(?:\s*[:\s].*)?$', text, re.MULTILINE | re.IGNORECASE):
+                s_iter = self.buffer.get_iter_at_offset(m.start())
+                e_iter = self.buffer.get_iter_at_offset(m.end())
+                self.buffer.apply_tag(self.tag_paste_keyword, s_iter, e_iter)
             
         # Apply bullet points (- item or * item) and numbered lists (1. item)
         for m in re.finditer(r'^(\s*(?:[-*+]|\d+\.)\s+)(.*)$', text, re.MULTILINE):
