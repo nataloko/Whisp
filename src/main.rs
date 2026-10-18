@@ -6,6 +6,7 @@
 
 mod markdown;
 mod notes;
+mod rtf;
 #[cfg(windows)]
 mod win;
 

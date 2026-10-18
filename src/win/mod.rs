@@ -238,7 +238,7 @@ impl App {
                     );
                 }
                 self.layout();
-                self.highlight();
+                self.restyle();
             }
             WM_SETTINGCHANGE if lparam.0 != 0 => {
                 // SAFETY: for WM_SETTINGCHANGE, a non-zero lparam is a NUL terminated string.
@@ -285,7 +285,14 @@ impl App {
             let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
             let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, flags);
         }
-        self.highlight();
+        self.restyle();
+    }
+
+    /// Restyles after a theme or DPI change.
+    fn restyle(&self) {
+        self.busy.set(true);
+        self.editor.restyle(&self.theme.get(), self.dpi.get());
+        self.busy.set(false);
     }
 
     fn highlight(&self) {
@@ -407,8 +414,7 @@ impl App {
             }
         };
         self.busy.set(true);
-        self.editor.set_text(&text);
-        self.editor.highlight(&self.theme.get(), self.dpi.get());
+        self.editor.load(&text, &self.theme.get(), self.dpi.get());
         self.busy.set(false);
         self.current.set(index);
         self.dirty.set(false);

@@ -6,6 +6,7 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{COLORREF, HGLOBAL, HINSTANCE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::{
@@ -17,7 +18,7 @@ use windows::core::{GUID, HRESULT, IUnknown, Interface, PCWSTR, w};
 
 use super::theme::Theme;
 use crate::markdown::{self, Style};
-use crate::notes;
+use crate::{notes, rtf};
 
 const CF_UNICODETEXT: u32 = 13;
 const IID_ITEXTDOCUMENT: GUID = GUID::from_u128(0x8cc497c0_a1df_11ce_8098_00aa0047be5d);
@@ -25,6 +26,8 @@ const IID_ITEXTDOCUMENT: GUID = GUID::from_u128(0x8cc497c0_a1df_11ce_8098_00aa00
 const FONT_SIZE: i32 = 220;
 /// H1 to H3 sizes in twips.
 const HEADING_SIZES: [i32; 3] = [300, 260, 240];
+/// Above this many spans, applying them one call each takes seconds.
+const MAX_SPAN_CALLS: usize = 2000;
 
 /// The start of ITextDocument's vtable (tom.h), up to `Undo`.
 #[repr(C)]
@@ -188,40 +191,33 @@ impl Editor {
         notes::to_lf(&String::from_utf16_lossy(&self.text_utf16()))
     }
 
-    /// Replaces the whole text without notifications or undo history and
-    /// puts the caret at the end.
-    pub fn set_text(&self, text: &str) {
-        let units: Vec<u16> = text
-            .encode_utf16()
-            .map(|u| {
-                if u == u16::from(b'\n') {
-                    u16::from(b'\r')
-                } else {
-                    u
-                }
-            })
-            .collect();
-        let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
-        let mut source = StreamSource {
-            data: &bytes,
-            pos: 0,
-        };
-        let stream = EDITSTREAM {
-            dwCookie: &mut source as *mut StreamSource as usize,
-            dwError: 0,
-            pfnCallback: Some(stream_in),
-        };
-        // SAFETY: `stream` and `source` outlive EM_STREAMIN, which calls
-        // `stream_in` synchronously.
+    /// Loads a note: its text and highlighting in one RTF stream, with no
+    /// undo history, no change notifications and the caret at the end.
+    pub fn load(&self, text: &str, theme: &Theme, dpi: u32) {
+        let spans = markdown::highlight(text);
+        let expected = to_cr(text);
+        let document = rtf::document(text, &spans, &look(theme, dpi));
+        // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
-            // Plain text, so text that looks like RTF is not parsed as RTF.
-            send(
-                self.hwnd,
-                EM_STREAMIN,
-                (SF_TEXT | SF_UNICODE) as usize,
-                &stream as *const _ as isize,
-            );
+            // Also sets the default format, used when typing into an empty note.
+            self.reset_format(theme, dpi);
+            self.stream_in(document.as_bytes(), SF_RTF);
+            if !self.has_text(&expected) {
+                // FALLBACK: the RTF did not reproduce the text exactly. Load it
+                // as plain text, which cannot alter it, and style it span by
+                // span if that is quick enough.
+                OutputDebugStringW(w!(
+                    "whisp: RTF load did not match the note, loaded as plain text\n"
+                ));
+                let bytes: Vec<u8> = expected.iter().flat_map(|u| u.to_le_bytes()).collect();
+                self.stream_in(&bytes, SF_TEXT | SF_UNICODE);
+                if spans.len() <= MAX_SPAN_CALLS {
+                    self.apply_spans(&spans, theme, dpi);
+                } else {
+                    self.reset_format(theme, dpi);
+                }
+            }
             send(self.hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
             let end = self.len() as i32;
             let caret = CHARRANGE {
@@ -234,13 +230,126 @@ impl Editor {
         }
     }
 
-    /// Restyles the whole text from its Markdown. Formatting stays out of
+    /// Whether the editor holds exactly `expected` (UTF-16, `\r` breaks).
+    fn has_text(&self, expected: &[u16]) -> bool {
+        let actual = self.text_utf16();
+        if actual == expected {
+            return true;
+        }
+        // RichEdit may merge a final \par into the paragraph mark every
+        // document ends with; put the line break back and check again.
+        let cr = u16::from(b'\r');
+        if expected.len() == actual.len() + 1
+            && expected.ends_with(&[cr])
+            && expected.starts_with(&actual)
+        {
+            let end = actual.len() as i32;
+            let caret = CHARRANGE {
+                cpMin: end,
+                cpMax: end,
+            };
+            // SAFETY: `caret` outlives the call.
+            unsafe { send(self.hwnd, EM_EXSETSEL, 0, &caret as *const _ as isize) };
+            self.replace_selection(&[cr]);
+            return self.text_utf16() == expected;
+        }
+        false
+    }
+
+    /// Replaces the whole text with a stream in `format`.
+    fn stream_in(&self, data: &[u8], format: u32) {
+        let mut source = StreamSource { data, pos: 0 };
+        let stream = EDITSTREAM {
+            dwCookie: &mut source as *mut StreamSource as usize,
+            dwError: 0,
+            pfnCallback: Some(read_source),
+        };
+        // SAFETY: `stream` and `source` outlive EM_STREAMIN, which calls
+        // `read_source` synchronously.
+        unsafe {
+            send(
+                self.hwnd,
+                EM_STREAMIN,
+                format as usize,
+                &stream as *const _ as isize,
+            )
+        };
+    }
+
+    /// Restyles the text as it is now, while typing. Formatting stays out of
     /// the undo stack and sends no change notifications.
     pub fn highlight(&self, theme: &Theme, dpi: u32) {
         let spans = markdown::highlight(&String::from_utf16_lossy(&self.text_utf16()));
+        // TODO(change 2): restyle only what changed. Until then, skip notes
+        // with too many spans, which would freeze the window.
+        if spans.len() <= MAX_SPAN_CALLS {
+            self.apply_spans(&spans, theme, dpi);
+        }
+    }
+
+    /// Restyles everything after a theme or DPI change, keeping the view.
+    pub fn restyle(&self, theme: &Theme, dpi: u32) {
+        let text = self.text();
+        let spans = markdown::highlight(&text);
+        if spans.len() <= MAX_SPAN_CALLS {
+            self.apply_spans(&spans, theme, dpi);
+            return;
+        }
+        // Too many spans to apply one by one: reload as RTF. This clears the
+        // undo history.
+        let mut sel = CHARRANGE::default();
+        let mut scroll = POINT::default();
+        // SAFETY: pointers to live locals.
+        unsafe {
+            send(self.hwnd, EM_EXGETSEL, 0, &mut sel as *mut _ as isize);
+            send(
+                self.hwnd,
+                EM_GETSCROLLPOS,
+                0,
+                &mut scroll as *mut _ as isize,
+            );
+            self.load(&text, theme, dpi);
+            send(self.hwnd, EM_EXSETSEL, 0, &sel as *const _ as isize);
+            send(self.hwnd, EM_SETSCROLLPOS, 0, &scroll as *const _ as isize);
+        }
+    }
+
+    /// Resets all text to the base format and sets the default format.
+    fn reset_format(&self, theme: &Theme, dpi: u32) {
+        let mut cf = format();
+        cf.Base.dwMask = CFM_SIZE
+            | CFM_COLOR
+            | CFM_BOLD
+            | CFM_ITALIC
+            | CFM_UNDERLINE
+            | CFM_STRIKEOUT
+            | CFM_BACKCOLOR;
+        cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
+        cf.Base.yHeight = twips(FONT_SIZE, dpi);
+        cf.Base.crTextColor = theme.text;
+        // SAFETY: `cf` outlives both calls.
+        unsafe {
+            // The face is only set as the default, so RichEdit's own font
+            // fallback for scripts Consolas lacks is kept.
+            send(
+                self.hwnd,
+                EM_SETCHARFORMAT,
+                SCF_ALL as usize,
+                &cf as *const _ as isize,
+            );
+            set_face(&mut cf);
+            send(
+                self.hwnd,
+                EM_SETCHARFORMAT,
+                SCF_DEFAULT as usize,
+                &cf as *const _ as isize,
+            );
+        }
+    }
+
+    /// Resets the format, then applies `spans` one call each.
+    fn apply_spans(&self, spans: &[markdown::Span], theme: &Theme, dpi: u32) {
         // SAFETY: every pointer passed refers to a local that outlives its call.
-        let sys_dpi = unsafe { GetDpiForSystem() }.max(1) as i32;
-        let twips = |size: i32| size * dpi as i32 / sys_dpi;
         unsafe {
             let h = self.hwnd;
             let mask = send(h, EM_SETEVENTMASK, 0, 0);
@@ -251,40 +360,14 @@ impl Editor {
             send(h, EM_GETSCROLLPOS, 0, &mut scroll as *mut _ as isize);
             self.undo(tomSuspend.0);
 
-            let mut cf = format();
-            cf.Base.dwMask = CFM_SIZE
-                | CFM_COLOR
-                | CFM_BOLD
-                | CFM_ITALIC
-                | CFM_UNDERLINE
-                | CFM_STRIKEOUT
-                | CFM_BACKCOLOR;
-            cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
-            cf.Base.yHeight = twips(FONT_SIZE);
-            cf.Base.crTextColor = theme.text;
-            // The face is only set as the default, so RichEdit's own font
-            // fallback for scripts Consolas lacks is kept.
-            send(
-                h,
-                EM_SETCHARFORMAT,
-                SCF_ALL as usize,
-                &cf as *const _ as isize,
-            );
-            set_face(&mut cf);
-            send(
-                h,
-                EM_SETCHARFORMAT,
-                SCF_DEFAULT as usize,
-                &cf as *const _ as isize,
-            );
-
+            self.reset_format(theme, dpi);
             for span in spans {
                 let range = CHARRANGE {
                     cpMin: span.start as i32,
                     cpMax: span.end as i32,
                 };
                 send(h, EM_EXSETSEL, 0, &range as *const _ as isize);
-                let cf = span_format(span.style, theme, twips);
+                let cf = span_format(span.style, theme, |size| twips(size, dpi));
                 send(
                     h,
                     EM_SETCHARFORMAT,
@@ -337,6 +420,49 @@ impl Editor {
         text.push(0);
         // SAFETY: `text` is NUL terminated and outlives the call.
         unsafe { send(self.hwnd, EM_REPLACESEL, 1, text.as_ptr() as isize) };
+    }
+}
+
+/// `text` as RichEdit stores it: UTF-16 with `\r` line breaks.
+fn to_cr(text: &str) -> Vec<u16> {
+    text.encode_utf16()
+        .map(|u| {
+            if u == u16::from(b'\n') {
+                u16::from(b'\r')
+            } else {
+                u
+            }
+        })
+        .collect()
+}
+
+/// A size in twips for `dpi`. RichEdit converts twips to pixels at the
+/// system DPI.
+fn twips(size: i32, dpi: u32) -> i32 {
+    // SAFETY: plain call.
+    let sys_dpi = unsafe { GetDpiForSystem() }.max(1) as i32;
+    size * dpi as i32 / sys_dpi
+}
+
+fn rgb(c: COLORREF) -> rtf::Rgb {
+    (c.0 as u8, (c.0 >> 8) as u8, (c.0 >> 16) as u8)
+}
+
+/// The theme and sizes for RTF. Sizes are in half points, rounded.
+fn look(theme: &Theme, dpi: u32) -> rtf::Look {
+    let half_points = |size| ((twips(size, dpi) + 5) / 10).max(1) as u32;
+    rtf::Look {
+        text: rgb(theme.text),
+        symbol: rgb(theme.symbol),
+        heading: rgb(theme.heading),
+        link: rgb(theme.link),
+        list: rgb(theme.list),
+        checked: rgb(theme.checked),
+        comment: rgb(theme.comment),
+        quote: rgb(theme.quote),
+        code_background: rgb(theme.code_background),
+        size: half_points(FONT_SIZE),
+        heading_sizes: HEADING_SIZES.map(half_points),
     }
 }
 
@@ -423,12 +549,12 @@ struct StreamSource<'a> {
     pos: usize,
 }
 
-unsafe extern "system" fn stream_in(cookie: usize, buf: *mut u8, cb: i32, pcb: *mut i32) -> u32 {
-    // SAFETY: `cookie` is the StreamSource set up in `set_text`, alive during
+unsafe extern "system" fn read_source(cookie: usize, buf: *mut u8, cb: i32, pcb: *mut i32) -> u32 {
+    // SAFETY: `cookie` is the StreamSource set up in `stream_in`, alive during
     // EM_STREAMIN; RichEdit provides `cb` writable bytes at `buf`.
     unsafe {
         let source = &mut *(cookie as *mut StreamSource);
-        // Whole UTF-16 units only.
+        // Whole UTF-16 units only, for plain text streams.
         let n = (source.data.len() - source.pos).min(cb.max(0) as usize & !1);
         std::ptr::copy_nonoverlapping(source.data.as_ptr().add(source.pos), buf, n);
         source.pos += n;
