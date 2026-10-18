@@ -7,9 +7,9 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: whisp main\n"
-"Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-13 13:41+0530\n"
-"PO-Revision-Date: 2026-10-09 22:10+0200\n"
+"Report-Msgid-Bugs-To: https://github.com/tanaybhomia/Whisp/issues\n"
+"POT-Creation-Date: 2026-10-18 02:43+0000\n"
+"PO-Revision-Date: 2026-10-18 09:38+0200\n"
 "Last-Translator: Martin Srebotnjak <miles@filmsi.net>\n"
 "Language-Team: Slovenian GNOME Translation Team <gnome-si@googlegroups.com>\n"
 "Language: sl\n"
@@ -64,7 +64,7 @@ msgstr "Prevedi"
 msgid "Donate"
 msgstr "Doniraj"
 
-#: src/whisp/dialogs/export.py:19 src/whisp/dialogs/preferences.py:331
+#: src/whisp/dialogs/export.py:19 src/whisp/dialogs/preferences.py:333
 #: src/whisp/window.py:241
 msgid "Export Note"
 msgstr "Izvozi zapisek"
@@ -78,78 +78,78 @@ msgid "Note exported successfully"
 msgstr "Beležka je bilo uspešno izvoženo"
 
 #. --- Appearance Page ---
-#: src/whisp/dialogs/preferences.py:50
+#: src/whisp/dialogs/preferences.py:52
 msgid "Appearance"
 msgstr "Videz"
 
 #. Appearance Group
-#: src/whisp/dialogs/preferences.py:53
+#: src/whisp/dialogs/preferences.py:55
 msgid "Text"
 msgstr "Besedilo"
 
-#: src/whisp/dialogs/preferences.py:54
+#: src/whisp/dialogs/preferences.py:56
 msgid "Editor Font"
 msgstr "Pisava urejevalnika"
 
-#: src/whisp/dialogs/preferences.py:72
+#: src/whisp/dialogs/preferences.py:74
 msgid "System Default"
 msgstr "Privzeta sistemska"
 
 #. Theme Snippets Group
-#: src/whisp/dialogs/preferences.py:92
+#: src/whisp/dialogs/preferences.py:94
 msgid "Paper Theme"
 msgstr "Papirna tema"
 
 #. Line Spacing
-#: src/whisp/dialogs/preferences.py:122
+#: src/whisp/dialogs/preferences.py:124
 msgid "Line Spacing"
 msgstr "Razmik med vrsticami"
 
 #. --- Behavior Page ---
-#: src/whisp/dialogs/preferences.py:142
+#: src/whisp/dialogs/preferences.py:144
 msgid "Behavior"
 msgstr "Vedenje"
 
 #. Behavior Group
-#: src/whisp/dialogs/preferences.py:145
+#: src/whisp/dialogs/preferences.py:147
 msgid "Workflow"
 msgstr "Potek dela"
 
-#: src/whisp/dialogs/preferences.py:148
+#: src/whisp/dialogs/preferences.py:150
 msgid "WYSIWYG Scope"
 msgstr "Doseg WYSIWYG"
 
-#: src/whisp/dialogs/preferences.py:149
+#: src/whisp/dialogs/preferences.py:151
 msgid "Apply Live Formatting globally to all notes, or remember it per note."
 msgstr ""
 "Oblikovanje v realnem času uporabi za vse zapiske hkrati ali ga shrani "
 "posebej za vsak zapisek."
 
-#: src/whisp/dialogs/preferences.py:151
+#: src/whisp/dialogs/preferences.py:153
 msgid "Global"
 msgstr "Globalno"
 
-#: src/whisp/dialogs/preferences.py:151
+#: src/whisp/dialogs/preferences.py:153
 msgid "Per Note"
 msgstr "Na zapisek"
 
-#: src/whisp/dialogs/preferences.py:163
+#: src/whisp/dialogs/preferences.py:165
 msgid "Startup Behavior"
 msgstr "Vedenje ob zagonu"
 
-#: src/whisp/dialogs/preferences.py:164
+#: src/whisp/dialogs/preferences.py:166
 msgid "Restore last active note"
 msgstr "Obnovi zadnji dejavni zapisek"
 
-#: src/whisp/dialogs/preferences.py:164
+#: src/whisp/dialogs/preferences.py:166
 msgid "Start with empty note"
 msgstr "Začni s praznim zapiskom"
 
-#: src/whisp/dialogs/preferences.py:177
+#: src/whisp/dialogs/preferences.py:179
 msgid "Auto-Archive Inactive Notes"
 msgstr "Samodejno arhiviraj nedejavne zapiske"
 
-#: src/whisp/dialogs/preferences.py:178
+#: src/whisp/dialogs/preferences.py:180
 msgid ""
 "Notes are not deleted. They are simply hidden from the app to reduce "
 "clutter, but remain fully searchable via Ctrl+F."
@@ -157,27 +157,27 @@ msgstr ""
 "Zapiski se ne izbrišejo. V programu so le skriti, da se zmanjša nered, "
 "vendar jih je še vedno mogoče v celoti iskati s kombinacijo tipk krmilka+F."
 
-#: src/whisp/dialogs/preferences.py:180
+#: src/whisp/dialogs/preferences.py:182
 msgid "Never"
 msgstr "Nikoli"
 
-#: src/whisp/dialogs/preferences.py:180
+#: src/whisp/dialogs/preferences.py:182
 msgid "1 Week"
 msgstr "1 teden"
 
-#: src/whisp/dialogs/preferences.py:180
+#: src/whisp/dialogs/preferences.py:182
 msgid "1 Month"
 msgstr "1 mesec"
 
-#: src/whisp/dialogs/preferences.py:180
+#: src/whisp/dialogs/preferences.py:182
 msgid "1 Year"
 msgstr "1 leto"
 
-#: src/whisp/dialogs/preferences.py:199
+#: src/whisp/dialogs/preferences.py:201
 msgid "Max Carousel Size"
 msgstr "Največja velikost vrtiljaka"
 
-#: src/whisp/dialogs/preferences.py:200
+#: src/whisp/dialogs/preferences.py:202
 msgid ""
 "Limit the number of notes loaded into the swipable carousel. Older notes "
 "remain fully searchable."
@@ -185,208 +185,208 @@ msgstr ""
 "Omejite število zapiskov, naloženih v drsni vrtiljak. Po starejših zapiskih "
 "lahko še vedno iščete."
 
-#: src/whisp/dialogs/preferences.py:202
+#: src/whisp/dialogs/preferences.py:204
 msgid "10 Notes"
 msgstr "10 zapiskov"
 
-#: src/whisp/dialogs/preferences.py:202
+#: src/whisp/dialogs/preferences.py:204
 msgid "25 Notes"
 msgstr "25 zapiskov"
 
-#: src/whisp/dialogs/preferences.py:202
+#: src/whisp/dialogs/preferences.py:204
 msgid "50 Notes"
 msgstr "50 zapiskov"
 
-#: src/whisp/dialogs/preferences.py:202
+#: src/whisp/dialogs/preferences.py:204
 msgid "Unlimited"
 msgstr "Neomejeno"
 
-#: src/whisp/dialogs/preferences.py:221
+#: src/whisp/dialogs/preferences.py:223
 msgid "Confirm Before Deleting"
 msgstr "Potrdi pred brisanjem"
 
-#: src/whisp/dialogs/preferences.py:222
+#: src/whisp/dialogs/preferences.py:224
 msgid "Ask for confirmation when deleting a note"
 msgstr "Vprašaj za potrditev ob brisanju zapiska"
 
-#: src/whisp/dialogs/preferences.py:233
+#: src/whisp/dialogs/preferences.py:235
 msgid "Show Command Confirmations"
 msgstr "Pokaži potrditve ukazov"
 
-#: src/whisp/dialogs/preferences.py:234
+#: src/whisp/dialogs/preferences.py:236
 msgid ""
 "Display a small confirmation message when you use a text manipulation command"
 msgstr ""
 "Prikaži majhno potrditveno sporočilo, ko se uporabi ukaz za obravnavo "
 "besedila"
 
-#: src/whisp/dialogs/preferences.py:249
+#: src/whisp/dialogs/preferences.py:251
 msgid "Enable Slate Mode on Startup"
 msgstr "Omogoči način klape ob zagonu"
 
-#: src/whisp/dialogs/preferences.py:250
+#: src/whisp/dialogs/preferences.py:252
 msgid "Always launch Whisp directly into Slate Mode"
 msgstr "Vedno zaženi Snopič neposredno v načinu klape"
 
 #. --- Running Group ---
-#: src/whisp/dialogs/preferences.py:267
+#: src/whisp/dialogs/preferences.py:269
 msgid "Running"
 msgstr "V teku"
 
-#: src/whisp/dialogs/preferences.py:270
+#: src/whisp/dialogs/preferences.py:272
 msgid "Keep Running in Background"
 msgstr "Še naprej izvajaj v ozadju"
 
-#: src/whisp/dialogs/preferences.py:271
+#: src/whisp/dialogs/preferences.py:273
 msgid "Hides the application when closed instead of terminating"
 msgstr "Skrije program ob zaprtju namesto ustavitve"
 
-#: src/whisp/dialogs/preferences.py:282
+#: src/whisp/dialogs/preferences.py:284
 msgid "Run on Startup"
 msgstr "Zaženi ob zagonu"
 
-#: src/whisp/dialogs/preferences.py:283
+#: src/whisp/dialogs/preferences.py:285
 msgid "Automatically launch the application when you log in"
 msgstr "Program zaženi samodejno ob prijavi uporabnika v sistem"
 
-#: src/whisp/dialogs/preferences.py:294
+#: src/whisp/dialogs/preferences.py:296
 msgid "Start Hidden"
 msgstr "Zaženi skrito"
 
-#: src/whisp/dialogs/preferences.py:295
+#: src/whisp/dialogs/preferences.py:297
 msgid "Launch in the background without opening a window"
 msgstr "Zaženi v ozadju brez odpiranja oken"
 
 #. --- Shortcuts Page ---
-#: src/whisp/dialogs/preferences.py:310
+#: src/whisp/dialogs/preferences.py:312
 msgid "Shortcuts"
 msgstr "Tipkovne bližnjice"
 
-#: src/whisp/dialogs/preferences.py:317
+#: src/whisp/dialogs/preferences.py:319
 msgid "Application"
 msgstr "Program"
 
-#: src/whisp/dialogs/preferences.py:318
+#: src/whisp/dialogs/preferences.py:320
 msgid "New Note"
 msgstr "Nov zapisek"
 
-#: src/whisp/dialogs/preferences.py:319
+#: src/whisp/dialogs/preferences.py:321
 msgid "Search Notes"
 msgstr "Išči po zapiskih"
 
-#: src/whisp/dialogs/preferences.py:320 src/whisp/window.py:246
+#: src/whisp/dialogs/preferences.py:322 src/whisp/window.py:246
 msgid "Preferences"
 msgstr "Nastavitve"
 
-#: src/whisp/dialogs/preferences.py:321
+#: src/whisp/dialogs/preferences.py:323
 msgid "Show Shortcuts"
 msgstr "Pokaži tipkovne bližnjice‫"
 
-#: src/whisp/dialogs/preferences.py:322
+#: src/whisp/dialogs/preferences.py:324
 msgid "Toggle Slate Mode"
 msgstr "Preklopi način klape"
 
-#: src/whisp/dialogs/preferences.py:323
+#: src/whisp/dialogs/preferences.py:325
 msgid "Quit Application"
 msgstr "Izhod iz programa"
 
-#: src/whisp/dialogs/preferences.py:325
+#: src/whisp/dialogs/preferences.py:327
 msgid "Note Management"
 msgstr "Upravljanje zapiskov"
 
-#: src/whisp/dialogs/preferences.py:326
+#: src/whisp/dialogs/preferences.py:328
 msgid "Delete Note"
 msgstr "Izbriši zapisek"
 
-#: src/whisp/dialogs/preferences.py:327
+#: src/whisp/dialogs/preferences.py:329
 msgid "Undo Delete"
 msgstr "Razveljavi brisanje"
 
-#: src/whisp/dialogs/preferences.py:328
+#: src/whisp/dialogs/preferences.py:330
 msgid "Pin Note"
 msgstr "Pripni zapisek"
 
-#: src/whisp/dialogs/preferences.py:329
+#: src/whisp/dialogs/preferences.py:331
 msgid "Move Note to Front"
 msgstr "Premakni zapisek v ospredje"
 
-#: src/whisp/dialogs/preferences.py:330
+#: src/whisp/dialogs/preferences.py:332
 msgid "Copy Note"
 msgstr "Kopiraj zapisek"
 
-#: src/whisp/dialogs/preferences.py:332
+#: src/whisp/dialogs/preferences.py:334
 msgid "Toggle WYSIWYG"
 msgstr "Preklopi WYSIWYG"
 
-#: src/whisp/dialogs/preferences.py:334
+#: src/whisp/dialogs/preferences.py:336
 msgid "Navigation"
 msgstr "Krmarjenje"
 
-#: src/whisp/dialogs/preferences.py:335
+#: src/whisp/dialogs/preferences.py:337
 msgid "Previous Note"
 msgstr "Prejšnji zapisek"
 
-#: src/whisp/dialogs/preferences.py:336
+#: src/whisp/dialogs/preferences.py:338
 msgid "Next Note"
 msgstr "Naslednji zapisek"
 
-#: src/whisp/dialogs/preferences.py:337
+#: src/whisp/dialogs/preferences.py:339
 msgid "First Note"
 msgstr "Prvi zapisek"
 
-#: src/whisp/dialogs/preferences.py:338
+#: src/whisp/dialogs/preferences.py:340
 msgid "Last Note"
 msgstr "Zadnji zapisek"
 
-#: src/whisp/dialogs/preferences.py:352
+#: src/whisp/dialogs/preferences.py:354
 msgid "Disabled"
 msgstr "Onemogočene"
 
-#: src/whisp/dialogs/preferences.py:363 src/whisp/dialogs/preferences.py:389
+#: src/whisp/dialogs/preferences.py:365 src/whisp/dialogs/preferences.py:391
 msgid "Reset to Default"
 msgstr "Ponastavi na privzeto"
 
 #. --- Storage Page ---
-#: src/whisp/dialogs/preferences.py:380
+#: src/whisp/dialogs/preferences.py:382
 msgid "Storage"
 msgstr "Shramba"
 
-#: src/whisp/dialogs/preferences.py:381
+#: src/whisp/dialogs/preferences.py:383
 msgid "Data Location"
 msgstr "Kraj podatkov"
 
-#: src/whisp/dialogs/preferences.py:383
+#: src/whisp/dialogs/preferences.py:385
 msgid "Notes Directory"
 msgstr "Mapa zapiskov"
 
-#: src/whisp/dialogs/preferences.py:393
+#: src/whisp/dialogs/preferences.py:395
 msgid "Change…"
 msgstr "Spremeni …"
 
-#: src/whisp/dialogs/preferences.py:549
+#: src/whisp/dialogs/preferences.py:551
 msgid "Set Shortcut"
 msgstr "Določi tipkovno bližnjico"
 
-#: src/whisp/dialogs/preferences.py:550
+#: src/whisp/dialogs/preferences.py:552
 #, python-brace-format
 msgid "Recording Shortcut for <b>{}</b>"
 msgstr "Snemanje bližnjica za <b>{}</b>"
 
-#: src/whisp/dialogs/preferences.py:559
+#: src/whisp/dialogs/preferences.py:561
 msgid "<span foreground='gray' size='small'>press backspace to disable</span>"
 msgstr ""
 "<span foreground='gray' size='small'>pritisnite vračalko za onemogočanje</"
 "span>"
 
-#: src/whisp/dialogs/preferences.py:578 src/whisp/window.py:808
+#: src/whisp/dialogs/preferences.py:580 src/whisp/window.py:808
 msgid "Cancel"
 msgstr "Prekliči"
 
-#: src/whisp/dialogs/preferences.py:616
+#: src/whisp/dialogs/preferences.py:618
 msgid "This shortcut is already in use"
 msgstr "Ta bližnjica se že uporablja"
 
-#: src/whisp/dialogs/preferences.py:639
+#: src/whisp/dialogs/preferences.py:641
 msgid "Select Notes Directory"
 msgstr "Izberite mapo zapiskov"
 
@@ -435,348 +435,364 @@ msgid "❤ Support Whisp"
 msgstr "❤ Podprite Snopič!"
 
 #: src/whisp/editor.py:356
+msgid "Toggle AutoPaste clipboard collector"
+msgstr "Vklop/izklop zbiralnika odložišča Samoprilepi"
+
+#: src/whisp/editor.py:357
 msgid "Insert word count of current note"
 msgstr "Vstavi število besed v trenutni opombi"
 
-#: src/whisp/editor.py:357 src/whisp/editor.py:361
+#: src/whisp/editor.py:358 src/whisp/editor.py:362
 msgid "Current date"
 msgstr "Trenutni datum"
 
-#: src/whisp/editor.py:358 src/whisp/editor.py:362
+#: src/whisp/editor.py:359 src/whisp/editor.py:363
 msgid "Date offset (+/- days)"
 msgstr "Datumski zamik (+/- dni)"
 
-#: src/whisp/editor.py:359
+#: src/whisp/editor.py:360
 msgid "Tomorrow's date"
 msgstr "Jutrišnji datum"
 
-#: src/whisp/editor.py:360
+#: src/whisp/editor.py:361
 msgid "Yesterday's date"
 msgstr "Včerajšnji datum"
 
-#: src/whisp/editor.py:363
+#: src/whisp/editor.py:364
 msgid "Current date and time"
 msgstr "Trenutni datum in čas"
 
-#: src/whisp/editor.py:364 src/whisp/editor.py:365
+#: src/whisp/editor.py:365 src/whisp/editor.py:366
 msgid "Current time"
 msgstr "Trenutni čas"
 
-#: src/whisp/editor.py:366
+#: src/whisp/editor.py:367
 msgid "Random numbers"
 msgstr "Naključna števila"
 
-#: src/whisp/editor.py:367
+#: src/whisp/editor.py:368
 msgid "Random letters"
 msgstr "Naključne črke"
 
-#: src/whisp/editor.py:368
+#: src/whisp/editor.py:369
 msgid "Random alphanumeric"
 msgstr "Naključno alfanumerično"
 
-#: src/whisp/editor.py:369
+#: src/whisp/editor.py:370
 msgid "Insert a random inspirational quote"
 msgstr "Vstavi naključni navdihujoč citat"
 
-#: src/whisp/editor.py:370
+#: src/whisp/editor.py:371
 msgid "Open a random Wikipedia page"
 msgstr "Odpri naključno stran na Wikipediji"
 
-#: src/whisp/editor.py:371
+#: src/whisp/editor.py:372
 msgid "Ask the Magic 8-Ball"
 msgstr "Vprašaj čarobno kroglo 8"
 
-#: src/whisp/editor.py:372
+#: src/whisp/editor.py:373
 msgid "Insert standard placeholder text"
 msgstr "Vstavi standardno nadomestno besedilo"
 
-#: src/whisp/editor.py:373
+#: src/whisp/editor.py:374
 msgid "Generate a secure 16-char password"
 msgstr "Ustvari varno geslo z 16 znaki"
 
-#: src/whisp/editor.py:374
+#: src/whisp/editor.py:375
 msgid "Generate a standard developer UUID"
 msgstr "Ustvari standardni UUID za razvijalce"
 
-#: src/whisp/editor.py:375
+#: src/whisp/editor.py:376
 msgid "Roll a 20-sided die"
 msgstr "Vrzi 20-stransko kocko"
 
-#: src/whisp/editor.py:376
+#: src/whisp/editor.py:377
 msgid "Roll a d20 die"
 msgstr "Vrzi kocko d20"
 
-#: src/whisp/editor.py:377
+#: src/whisp/editor.py:378
 msgid "Roll 4 d6 dice"
 msgstr "Vrzi 4 kocke d6"
 
-#: src/whisp/editor.py:378
+#: src/whisp/editor.py:379
 msgid "Convert document to uppercase"
 msgstr "Pretvori dokument v velike črke"
 
-#: src/whisp/editor.py:379
+#: src/whisp/editor.py:380
 msgid "Convert document to lowercase"
 msgstr "Pretvori dokument v male črke"
 
-#: src/whisp/editor.py:380
+#: src/whisp/editor.py:381
 msgid "Convert document to sentence case"
 msgstr "Pretvori dokument v velike začetnice"
 
-#: src/whisp/editor.py:381
+#: src/whisp/editor.py:382
 msgid "Convert document to title case"
 msgstr "Pretvori izbor besedila v besede z veliko začetnico"
 
-#: src/whisp/editor.py:382
+#: src/whisp/editor.py:383
 msgid "Capitalize first letter"
 msgstr "Prve črke v velike začetnice"
 
-#: src/whisp/editor.py:383
+#: src/whisp/editor.py:384
 msgid "Strip surrounding quotes"
 msgstr "Odstrani objemajoče narekovaje"
 
-#: src/whisp/editor.py:384
+#: src/whisp/editor.py:385
 msgid "Add text to the end of every line"
 msgstr "Dodaj besedilo na konec vsake vrstice"
 
-#: src/whisp/editor.py:385
+#: src/whisp/editor.py:386
 msgid "Add text to the beginning of every line"
 msgstr "Dodaj besedilo na začetek vsake vrstice"
 
-#: src/whisp/editor.py:386
+#: src/whisp/editor.py:387
 msgid "Find and replace text"
 msgstr "Poišči in zamenjaj besedilo"
 
-#: src/whisp/editor.py:387
+#: src/whisp/editor.py:388
 msgid "Sort lines alphabetically"
 msgstr "Vrstice razvrsti po abecedi"
 
-#: src/whisp/editor.py:388
+#: src/whisp/editor.py:389
 msgid "Sort lines by first number"
 msgstr "Vrstice razvrsti po prvi številki"
 
-#: src/whisp/editor.py:389
+#: src/whisp/editor.py:390
 msgid "Reverse line order"
 msgstr "Preobrni zaporedje vrstic"
 
-#: src/whisp/editor.py:390
+#: src/whisp/editor.py:391
 msgid "Remove empty lines"
 msgstr "Odstrani prazne vrstice"
 
-#: src/whisp/editor.py:391
+#: src/whisp/editor.py:392
 msgid "Remove lines containing text"
 msgstr "Odstrani vrstice, ki vsebujejo besedilo"
 
-#: src/whisp/editor.py:392
+#: src/whisp/editor.py:393
 msgid "Remove lines not containing text"
 msgstr "Odstrani vrstice, ki ne vsebujejo besedila"
 
-#: src/whisp/editor.py:393
+#: src/whisp/editor.py:394
 msgid "Keep only lines containing text"
 msgstr "Ohrani le vrstice, ki vsebujejo besedilo"
 
-#: src/whisp/editor.py:394
+#: src/whisp/editor.py:395
 msgid "Keep only lines not containing text"
 msgstr "Ohrani le vrstice, ki ne vsebujejo besedila"
 
-#: src/whisp/editor.py:395
+#: src/whisp/editor.py:396
 msgid "Trim whitespace from all lines"
 msgstr "Obreži končne presledne znake v vseh vrsticah"
 
-#: src/whisp/editor.py:396
+#: src/whisp/editor.py:397
 msgid "Remove duplicate lines"
 msgstr "Odstrani podvojene vrstice"
 
-#: src/whisp/editor.py:397
+#: src/whisp/editor.py:398
 msgid "Find and group duplicate lines"
 msgstr "Poišči in združi podvojene vrstice"
 
-#: src/whisp/editor.py:398
+#: src/whisp/editor.py:399
 msgid "Convert comma-separated items to list"
 msgstr "Pretvori seznam elementov, ločenih z vejico, v seznam"
 
-#: src/whisp/editor.py:399
+#: src/whisp/editor.py:400
 msgid "Convert commas to custom delimiter"
 msgstr "Pretvori vejice v ločilo po meri"
 
-#: src/whisp/editor.py:400
+#: src/whisp/editor.py:401
 msgid "Convert lines to comma-separated"
 msgstr "Pretvori vrstice v z vejico ločen seznam"
 
-#: src/whisp/editor.py:401
+#: src/whisp/editor.py:402
 msgid "Convert lines to custom delimiter"
 msgstr "Pretvori vrstice v ločilo po meri"
 
-#: src/whisp/editor.py:402
+#: src/whisp/editor.py:403
 msgid "Move checked items to bottom"
 msgstr "Premakni potrjene postavke na dno"
 
-#: src/whisp/editor.py:403
+#: src/whisp/editor.py:404
 msgid "Remove all checked items"
 msgstr "Odstrani vse potrjene predmete"
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "It is certain."
 msgstr "To je gotovo."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "It is decidedly so."
 msgstr "Zatrdno je tako."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Without a doubt."
 msgstr "Nedvomno."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Yes definitely."
 msgstr "Da, seveda."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "You may rely on it."
 msgstr "Lahko se zanesete na to."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "As I see it, yes."
 msgstr "Kot lahko vidimo, da."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Most likely."
 msgstr "Najverjetneje."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Outlook good."
 msgstr "Dobro kaže."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Yes."
 msgstr "Da."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Signs point to yes."
 msgstr "Vse kaže na: da."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Reply hazy, try again."
 msgstr "Odgovor nejasen, poskusite znova."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Ask again later."
 msgstr "Vprašajte ponovno kasneje."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Better not tell you now."
 msgstr "Bolje, da vam tega zdaj ne povem."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Cannot predict now."
 msgstr "Zdaj ni možno napovedati."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Concentrate and ask again."
 msgstr "Koncentrirajte se in vprašajte znova."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Don't count on it."
 msgstr "Ne računajte na to."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "My reply is no."
 msgstr "Moj odgovor je negativen."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "My sources say no."
 msgstr "Moji viri trdijo, da ne."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Outlook not so good."
 msgstr "Ne kaže dobro."
 
-#: src/whisp/editor_helpers/editor_expansions.py:286
+#: src/whisp/editor_helpers/editor_expansions.py:289
 msgid "Very doubtful."
 msgstr "Hudo vprašljivo."
 
-#: src/whisp/editor_helpers/editor_expansions.py:355
+#: src/whisp/editor_helpers/editor_expansions.py:367
 msgid "Converted to uppercase"
 msgstr "Pretvorjeno v velike črke"
 
-#: src/whisp/editor_helpers/editor_expansions.py:358
+#: src/whisp/editor_helpers/editor_expansions.py:370
 msgid "Converted to lowercase"
 msgstr "Pretvorjeno v male črke"
 
-#: src/whisp/editor_helpers/editor_expansions.py:361
+#: src/whisp/editor_helpers/editor_expansions.py:373
 msgid "Converted to Title Case"
 msgstr "Pretvorjeno v velike prve črke besed"
 
-#: src/whisp/editor_helpers/editor_expansions.py:366
+#: src/whisp/editor_helpers/editor_expansions.py:378
 msgid "Converted to Sentence case"
 msgstr "Pretvorjeno v stavčni zapis"
 
-#: src/whisp/editor_helpers/editor_expansions.py:369
+#: src/whisp/editor_helpers/editor_expansions.py:381
 msgid "Capitalized first letter"
 msgstr "Prva črka spremenjena v veliko začetnico"
 
-#: src/whisp/editor_helpers/editor_expansions.py:372
+#: src/whisp/editor_helpers/editor_expansions.py:384
 msgid "Stripped quotes"
 msgstr "Narekovaji so obrezani"
 
-#: src/whisp/editor_helpers/editor_expansions.py:403
+#: src/whisp/editor_helpers/editor_expansions.py:415
 msgid "Sorted lines alphabetically"
 msgstr "Vrstice razvrščene po abecedi"
 
-#: src/whisp/editor_helpers/editor_expansions.py:409
+#: src/whisp/editor_helpers/editor_expansions.py:421
 msgid "Sorted lines numerically"
 msgstr "Vrstice razvrščene po številih"
 
-#: src/whisp/editor_helpers/editor_expansions.py:412
+#: src/whisp/editor_helpers/editor_expansions.py:424
 msgid "Reversed line order"
 msgstr "Obratno zaporedje vrstic"
 
-#: src/whisp/editor_helpers/editor_expansions.py:415
+#: src/whisp/editor_helpers/editor_expansions.py:427
 msgid "Removed empty lines"
 msgstr "Odstranjene prazne vrstice"
 
-#: src/whisp/editor_helpers/editor_expansions.py:434
+#: src/whisp/editor_helpers/editor_expansions.py:446
 msgid "Trimmed whitespace from all lines"
 msgstr "Končni presledni znaki so obrezani v vseh vrsticah"
 
-#: src/whisp/editor_helpers/editor_expansions.py:443
+#: src/whisp/editor_helpers/editor_expansions.py:455
 msgid "Removed duplicate lines"
 msgstr "Podvojene vrstice odstranjene"
 
-#: src/whisp/editor_helpers/editor_expansions.py:454
+#: src/whisp/editor_helpers/editor_expansions.py:466
 msgid "Found duplicate lines"
 msgstr "Najdene podvojene vrstice"
 
-#: src/whisp/editor_helpers/editor_expansions.py:456
+#: src/whisp/editor_helpers/editor_expansions.py:468
 msgid "No duplicates found"
 msgstr "Ni mogoče najti dvojnikov"
 
-#: src/whisp/editor_helpers/editor_expansions.py:460
+#: src/whisp/editor_helpers/editor_expansions.py:472
 msgid "Converted commas to list"
 msgstr "Vejice pretvorjene v seznam"
 
-#: src/whisp/editor_helpers/editor_expansions.py:468
+#: src/whisp/editor_helpers/editor_expansions.py:480
 msgid "Converted lines to comma-separated"
 msgstr "Vrstice pretvorjene v z vejico ločen seznam"
 
-#: src/whisp/editor_helpers/editor_expansions.py:483
+#: src/whisp/editor_helpers/editor_expansions.py:495
 msgid "Moved checked items to bottom"
 msgstr "Potrjene postavke so prestavljene na dno"
 
-#: src/whisp/editor_helpers/editor_expansions.py:488
+#: src/whisp/editor_helpers/editor_expansions.py:500
 msgid "Removed all checked items"
 msgstr "Odstranjene so bile vse potrjene postavke"
 
-#: src/whisp/editor_helpers/editor_expansions.py:522
+#: src/whisp/editor_helpers/editor_expansions.py:534
 msgid "Extracting text from image…"
 msgstr "Izpisovanje besedila iz slike…"
 
-#: src/whisp/editor_helpers/editor_expansions.py:544
+#: src/whisp/editor_helpers/editor_expansions.py:556
 msgid "No text found in image"
 msgstr "Na sliki ni razpoznanega besedila"
 
-#: src/whisp/editor_helpers/editor_expansions.py:556
+#: src/whisp/editor_helpers/editor_expansions.py:568
 msgid "Failed to extract text from image"
 msgstr "Iz slike ni bilo mogoče izvleči besedila"
+
+#: src/whisp/editor_helpers/editor_paste.py:101
+msgid "AutoPaste disabled"
+msgstr "Funkcija Samoprilepi je onemogočena"
+
+#: src/whisp/editor_helpers/editor_paste.py:113
+msgid "AutoPaste active"
+msgstr "Funkcija Samoprilepi je aktivna"
+
+#: src/whisp/editor_helpers/editor_paste.py:115
+msgid "Stop"
+msgstr "Ustavi"
 
 #: src/whisp/window.py:245
 msgid "Keyboard Shortcuts"
@@ -902,10 +918,10 @@ msgstr "Rezervna možnost trajnega brisanja (napaka: {error})"
 msgid "Failed to delete completely: {error}"
 msgstr "Izbris ni bil v celoti uspešen: {error}"
 
-#: src/whisp/window.py:1052
+#: src/whisp/window.py:1064
 msgid "Entered Slate mode"
 msgstr "Vstop v način klape"
 
-#: src/whisp/window.py:1052
+#: src/whisp/window.py:1064
 msgid "Exited Slate mode"
 msgstr "Izhod iz načina klape"
