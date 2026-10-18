@@ -1,7 +1,9 @@
 //! The RichEdit control: plain text in and out, Markdown highlighting and
 //! plain text paste.
 
+use std::cell::RefCell;
 use std::ffi::c_void;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{COLORREF, HGLOBAL, HINSTANCE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
@@ -14,35 +16,24 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{GUID, HRESULT, IUnknown, Interface, PCWSTR, w};
+use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
 
 use super::theme::Theme;
-use crate::markdown::{self, Style};
-use crate::{notes, rtf};
+use crate::lines::{self, Line};
+use crate::{markdown, notes, rtf};
 
 const CF_UNICODETEXT: u32 = 13;
-const IID_ITEXTDOCUMENT: GUID = GUID::from_u128(0x8cc497c0_a1df_11ce_8098_00aa0047be5d);
 /// Base font size in twips (1/20 pt): 11 pt.
 const FONT_SIZE: i32 = 220;
 /// H1 to H3 sizes in twips.
 const HEADING_SIZES: [i32; 3] = [300, 260, 240];
-/// Above this many spans, applying them one call each takes seconds.
-const MAX_SPAN_CALLS: usize = 2000;
-
-/// The start of ITextDocument's vtable (tom.h), up to `Undo`.
-#[repr(C)]
-struct TextDocumentVtbl {
-    /// IUnknown (3 methods) and IDispatch (4).
-    _base: [usize; 7],
-    /// GetName to EndEditCollection.
-    _before_undo: [usize; 15],
-    undo: unsafe extern "system" fn(*mut c_void, i32, *mut i32) -> HRESULT,
-}
-
 pub struct Editor {
     pub hwnd: HWND,
-    /// ITextDocument, used to keep formatting out of the undo stack.
-    doc: Option<IUnknown>,
+    /// Text Object Model access, to style ranges without moving the
+    /// selection and to keep formatting out of the undo stack.
+    doc: Option<ITextDocument>,
+    /// Signatures of the lines as currently styled.
+    styled: RefCell<Vec<u64>>,
 }
 
 /// SendMessageW for RichEdit messages.
@@ -94,26 +85,13 @@ impl Editor {
                 None
             } else {
                 // EM_GETOLEINTERFACE hands over a reference to IRichEditOle.
-                let ole = IUnknown::from_raw(ole);
-                let mut doc = std::ptr::null_mut();
-                ole.query(&IID_ITEXTDOCUMENT, &mut doc)
-                    .is_ok()
-                    .then(|| IUnknown::from_raw(doc))
+                IUnknown::from_raw(ole).cast::<ITextDocument>().ok()
             };
-            Ok(Editor { hwnd, doc })
-        }
-    }
-
-    /// ITextDocument::Undo, used with tomSuspend and tomResume.
-    fn undo(&self, count: i32) {
-        if let Some(doc) = &self.doc {
-            let mut done = 0;
-            // SAFETY: `doc` came from QueryInterface for ITextDocument, so its
-            // vtable has the layout above.
-            unsafe {
-                let vtbl = *(doc.as_raw() as *const *const TextDocumentVtbl);
-                let _ = ((*vtbl).undo)(doc.as_raw(), count, &mut done);
-            }
+            Ok(Editor {
+                hwnd,
+                doc,
+                styled: RefCell::new(Vec::new()),
+            })
         }
     }
 
@@ -196,7 +174,9 @@ impl Editor {
     pub fn load(&self, text: &str, theme: &Theme, dpi: u32) {
         let spans = markdown::highlight(text);
         let expected = to_cr(text);
-        let document = rtf::document(text, &spans, &look(theme, dpi));
+        let look = look(theme, dpi);
+        let document = rtf::document(text, &spans, &look);
+        let lines = lines::lines(&expected, &spans);
         // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
@@ -205,19 +185,15 @@ impl Editor {
             self.stream_in(document.as_bytes(), SF_RTF);
             if !self.has_text(&expected) {
                 // FALLBACK: the RTF did not reproduce the text exactly. Load it
-                // as plain text, which cannot alter it, and style it span by
-                // span if that is quick enough.
+                // as plain text, which cannot alter it, and style every line.
                 OutputDebugStringW(w!(
                     "whisp: RTF load did not match the note, loaded as plain text\n"
                 ));
                 let bytes: Vec<u8> = expected.iter().flat_map(|u| u.to_le_bytes()).collect();
                 self.stream_in(&bytes, SF_TEXT | SF_UNICODE);
-                if spans.len() <= MAX_SPAN_CALLS {
-                    self.apply_spans(&spans, theme, dpi);
-                } else {
-                    self.reset_format(theme, dpi);
-                }
+                self.style_lines(&lines, &look);
             }
+            *self.styled.borrow_mut() = lines.iter().map(|l| l.signature).collect();
             send(self.hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
             let end = self.len() as i32;
             let caret = CHARRANGE {
@@ -276,27 +252,32 @@ impl Editor {
         };
     }
 
-    /// Restyles the text as it is now, while typing. Formatting stays out of
-    /// the undo stack and sends no change notifications.
-    pub fn highlight(&self, theme: &Theme, dpi: u32) {
-        let spans = markdown::highlight(&String::from_utf16_lossy(&self.text_utf16()));
-        // TODO(change 2): restyle only what changed. Until then, skip notes
-        // with too many spans, which would freeze the window.
-        if spans.len() <= MAX_SPAN_CALLS {
-            self.apply_spans(&spans, theme, dpi);
-        }
+    /// Restyles the lines whose text or styles changed since they were last
+    /// styled, without moving the selection. Formatting stays out of the
+    /// undo stack and sends no change notifications.
+    pub fn restyle_changes(&self, theme: &Theme, dpi: u32) {
+        let started = Instant::now();
+        let units = self.text_utf16();
+        let spans = markdown::highlight(&String::from_utf16_lossy(&units));
+        let lines = lines::lines(&units, &spans);
+        let signatures: Vec<u64> = lines.iter().map(|l| l.signature).collect();
+        let changed = lines::changed(&self.styled.borrow(), &signatures);
+        let runs = self.style_lines(&lines[changed.clone()], &look(theme, dpi));
+        *self.styled.borrow_mut() = signatures;
+        let report = format!(
+            "whisp: restyle {} lines, {runs} runs, {:.2} ms\n",
+            changed.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        // SAFETY: `report` outlives the call.
+        unsafe { OutputDebugStringW(&HSTRING::from(report)) };
     }
 
-    /// Restyles everything after a theme or DPI change, keeping the view.
+    /// Restyles everything after a theme or DPI change by reloading the text
+    /// as RTF, keeping the selection and scroll position. This clears the
+    /// undo history.
     pub fn restyle(&self, theme: &Theme, dpi: u32) {
         let text = self.text();
-        let spans = markdown::highlight(&text);
-        if spans.len() <= MAX_SPAN_CALLS {
-            self.apply_spans(&spans, theme, dpi);
-            return;
-        }
-        // Too many spans to apply one by one: reload as RTF. This clears the
-        // undo history.
         let mut sel = CHARRANGE::default();
         let mut scroll = POINT::default();
         // SAFETY: pointers to live locals.
@@ -314,6 +295,42 @@ impl Editor {
         }
     }
 
+    /// Resets `lines` to the base format, then applies their runs, through
+    /// TOM ranges. Returns the number of runs applied.
+    fn style_lines(&self, lines: &[Line], look: &rtf::Look) -> usize {
+        let Some(doc) = &self.doc else { return 0 };
+        if lines.is_empty() {
+            return 0;
+        }
+        let mut runs = 0;
+        // SAFETY: TOM calls on the document of our own control.
+        unsafe {
+            let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
+            let _ = doc.Freeze();
+            let _ = doc.Undo(tomSuspend.0);
+            for line in lines {
+                // Include the line breaks on both sides: they always have the
+                // base format, and a new break may have taken a heading's.
+                let first = line.start.saturating_sub(1);
+                if let Some(font) = font(doc, first, line.start + line.len + 1) {
+                    reset(&font, look);
+                }
+                for &(start, end, attr) in &line.runs {
+                    if let Some(font) = font(doc, line.start + start, line.start + end) {
+                        apply(&font, attr, look);
+                    }
+                    runs += 1;
+                }
+            }
+            let _ = doc.Undo(tomResume.0);
+            let _ = doc.Unfreeze();
+            // Repaint everything rather than trust what Unfreeze redraws.
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            send(self.hwnd, EM_SETEVENTMASK, 0, mask);
+        }
+        runs
+    }
+
     /// Resets all text to the base format and sets the default format.
     fn reset_format(&self, theme: &Theme, dpi: u32) {
         let mut cf = format();
@@ -325,7 +342,8 @@ impl Editor {
             | CFM_STRIKEOUT
             | CFM_BACKCOLOR;
         cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
-        cf.Base.yHeight = twips(FONT_SIZE, dpi);
+        // Rounded to half points like the RTF and TOM sizes.
+        cf.Base.yHeight = look(theme, dpi).size as i32 * 10;
         cf.Base.crTextColor = theme.text;
         // SAFETY: `cf` outlives both calls.
         unsafe {
@@ -344,44 +362,6 @@ impl Editor {
                 SCF_DEFAULT as usize,
                 &cf as *const _ as isize,
             );
-        }
-    }
-
-    /// Resets the format, then applies `spans` one call each.
-    fn apply_spans(&self, spans: &[markdown::Span], theme: &Theme, dpi: u32) {
-        // SAFETY: every pointer passed refers to a local that outlives its call.
-        unsafe {
-            let h = self.hwnd;
-            let mask = send(h, EM_SETEVENTMASK, 0, 0);
-            send(h, WM_SETREDRAW, 0, 0);
-            let mut sel = CHARRANGE::default();
-            send(h, EM_EXGETSEL, 0, &mut sel as *mut _ as isize);
-            let mut scroll = POINT::default();
-            send(h, EM_GETSCROLLPOS, 0, &mut scroll as *mut _ as isize);
-            self.undo(tomSuspend.0);
-
-            self.reset_format(theme, dpi);
-            for span in spans {
-                let range = CHARRANGE {
-                    cpMin: span.start as i32,
-                    cpMax: span.end as i32,
-                };
-                send(h, EM_EXSETSEL, 0, &range as *const _ as isize);
-                let cf = span_format(span.style, theme, |size| twips(size, dpi));
-                send(
-                    h,
-                    EM_SETCHARFORMAT,
-                    SCF_SELECTION as usize,
-                    &cf as *const _ as isize,
-                );
-            }
-
-            send(h, EM_EXSETSEL, 0, &sel as *const _ as isize);
-            send(h, EM_SETSCROLLPOS, 0, &scroll as *const _ as isize);
-            self.undo(tomResume.0);
-            send(h, WM_SETREDRAW, 1, 0);
-            let _ = InvalidateRect(Some(h), None, false);
-            send(h, EM_SETEVENTMASK, 0, mask);
         }
     }
 
@@ -479,69 +459,65 @@ fn set_face(cf: &mut CHARFORMAT2W) {
     }
 }
 
-fn span_format(style: Style, theme: &Theme, twips: impl Fn(i32) -> i32) -> CHARFORMAT2W {
-    let mut cf = format();
-    let b = &mut cf.Base;
-    fn color(b: &mut CHARFORMATW, c: COLORREF) {
-        b.dwMask |= CFM_COLOR;
-        b.crTextColor = c;
+/// The font of the range from `first` to `limit`; setting its properties
+/// formats the range.
+fn font(doc: &ITextDocument, first: usize, limit: usize) -> Option<ITextFont> {
+    // SAFETY: plain TOM calls on a live document.
+    unsafe {
+        doc.Range(first as i32, limit as i32)
+            .and_then(|r| r.GetFont())
+            .ok()
     }
-    match style {
-        Style::Heading(level) => {
-            b.dwMask = CFM_BOLD;
-            b.dwEffects = CFE_BOLD;
-            color(b, theme.heading);
-            if let Some(&size) = HEADING_SIZES.get(usize::from(level) - 1) {
-                b.dwMask |= CFM_SIZE;
-                b.yHeight = twips(size);
-            }
-        }
-        Style::Bold => {
-            b.dwMask = CFM_BOLD;
-            b.dwEffects = CFE_BOLD;
-        }
-        Style::Italic => {
-            b.dwMask = CFM_ITALIC;
-            b.dwEffects = CFE_ITALIC;
-        }
-        Style::Strike => {
-            b.dwMask = CFM_STRIKEOUT;
-            b.dwEffects = CFE_STRIKEOUT;
-        }
-        Style::Code => {
-            // Clearing CFE_AUTOBACKCOLOR makes crBackColor apply.
-            b.dwMask = CFM_BACKCOLOR;
-            cf.crBackColor = theme.code_background;
-        }
-        Style::ListMarker => {
-            b.dwMask = CFM_BOLD;
-            b.dwEffects = CFE_BOLD;
-            color(b, theme.list);
-        }
-        Style::Checkbox => {
-            b.dwMask = CFM_BOLD;
-            b.dwEffects = CFE_BOLD;
-            color(b, theme.checked);
-        }
-        Style::Checked => {
-            b.dwMask = CFM_STRIKEOUT;
-            b.dwEffects = CFE_STRIKEOUT;
-            color(b, theme.checked);
-        }
-        Style::Link => {
-            b.dwMask = CFM_UNDERLINE;
-            b.dwEffects = CFE_UNDERLINE;
-            color(b, theme.link);
-        }
-        Style::Quote => color(b, theme.quote),
-        Style::Comment => {
-            b.dwMask = CFM_ITALIC;
-            b.dwEffects = CFE_ITALIC;
-            color(b, theme.comment);
-        }
-        Style::Symbol => color(b, theme.symbol),
+}
+
+fn colorref((r, g, b): rtf::Rgb) -> i32 {
+    i32::from(r) | i32::from(g) << 8 | i32::from(b) << 16
+}
+
+fn points(half_points: u32) -> f32 {
+    half_points as f32 / 2.0
+}
+
+/// The base format, as `reset_format` sets it.
+fn reset(font: &ITextFont, look: &rtf::Look) {
+    // SAFETY: plain property calls on a live font.
+    unsafe {
+        let _ = font.SetBold(tomFalse.0);
+        let _ = font.SetItalic(tomFalse.0);
+        let _ = font.SetStrikeThrough(tomFalse.0);
+        let _ = font.SetUnderline(tomNone.0);
+        let _ = font.SetForeColor(colorref(look.text));
+        let _ = font.SetBackColor(tomAutoColor.0);
+        let _ = font.SetSize(points(look.size));
     }
-    cf
+}
+
+/// What `attr` adds to the base format, as in the RTF.
+fn apply(font: &ITextFont, attr: rtf::Attr, look: &rtf::Look) {
+    // SAFETY: plain property calls on a live font.
+    unsafe {
+        if attr.bold {
+            let _ = font.SetBold(tomTrue.0);
+        }
+        if attr.italic {
+            let _ = font.SetItalic(tomTrue.0);
+        }
+        if attr.strike {
+            let _ = font.SetStrikeThrough(tomTrue.0);
+        }
+        if attr.underline {
+            let _ = font.SetUnderline(tomSingle.0);
+        }
+        if attr.color != rtf::Attr::default().color {
+            let _ = font.SetForeColor(colorref(look.color(attr.color)));
+        }
+        if attr.code {
+            let _ = font.SetBackColor(colorref(look.code_background));
+        }
+        if attr.heading > 0 {
+            let _ = font.SetSize(points(look.heading_sizes[usize::from(attr.heading) - 1]));
+        }
+    }
 }
 
 struct StreamSource<'a> {

@@ -21,13 +21,11 @@ use theme::Theme;
 
 const CLASS: PCWSTR = w!("WhispWinWindow");
 const TIMER_SAVE: usize = 1;
-const TIMER_HIGHLIGHT: usize = 2;
 const SAVE_DELAY_MS: u32 = 500;
 const SAVE_RETRY_MS: u32 = 2000;
-/// Notes longer than this (UTF-16 units) are highlighted after a pause in
-/// typing instead of on every change.
-const LARGE_NOTE: usize = 100_000;
-const HIGHLIGHT_DELAY_MS: u32 = 300;
+/// Posted after a change, so restyling runs once RichEdit has finished
+/// handling the keystroke.
+const WM_RESTYLE: u32 = WM_APP + 1;
 
 #[derive(Clone, Copy)]
 enum Nav {
@@ -50,6 +48,8 @@ struct App {
     /// Set while the program itself changes the text, so EN_CHANGE is not
     /// taken for an edit.
     busy: Cell<bool>,
+    /// A WM_RESTYLE is posted and not handled yet.
+    restyle_posted: Cell<bool>,
     theme: Cell<Theme>,
     dpi: Cell<u32>,
 }
@@ -181,6 +181,7 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             dirty: Cell::new(false),
             save_failed: Cell::new(false),
             busy: Cell::new(false),
+            restyle_posted: Cell::new(false),
             theme: Cell::new(Theme::current()),
             dpi: Cell::new(dpi),
         }));
@@ -221,6 +222,13 @@ impl App {
                 self.changed();
             }
             WM_TIMER => self.timer(wparam.0),
+            WM_RESTYLE => {
+                self.restyle_posted.set(false);
+                self.busy.set(true);
+                self.editor
+                    .restyle_changes(&self.theme.get(), self.dpi.get());
+                self.busy.set(false);
+            }
             WM_DPICHANGED => {
                 self.dpi.set((wparam.0 & 0xffff) as u32);
                 // SAFETY: for WM_DPICHANGED, lparam points to the suggested window RECT.
@@ -295,38 +303,30 @@ impl App {
         self.busy.set(false);
     }
 
-    fn highlight(&self) {
-        self.busy.set(true);
-        self.editor.highlight(&self.theme.get(), self.dpi.get());
-        self.busy.set(false);
-    }
-
-    /// The user changed the text.
+    /// The user changed the text. Only records it: RichEdit is still in the
+    /// middle of handling the keystroke, so restyling waits for WM_RESTYLE.
     fn changed(&self) {
         if self.busy.get() {
             return;
         }
         self.dirty.set(true);
-        // SAFETY: timers on our own window; restarting one resets its delay.
+        // SAFETY: a timer and a posted message to our own window; restarting
+        // the timer resets its delay.
         unsafe {
             SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_DELAY_MS, None);
-            if self.editor.len() > LARGE_NOTE {
-                SetTimer(Some(self.hwnd), TIMER_HIGHLIGHT, HIGHLIGHT_DELAY_MS, None);
-                return;
+            if !self.restyle_posted.replace(true)
+                && PostMessageW(Some(self.hwnd), WM_RESTYLE, WPARAM(0), LPARAM(0)).is_err()
+            {
+                self.restyle_posted.set(false);
             }
         }
-        self.highlight();
     }
 
     fn timer(&self, id: usize) {
         // SAFETY: plain call.
         let _ = unsafe { KillTimer(Some(self.hwnd), id) };
-        match id {
-            TIMER_SAVE => {
-                self.flush();
-            }
-            TIMER_HIGHLIGHT => self.highlight(),
-            _ => {}
+        if id == TIMER_SAVE {
+            self.flush();
         }
     }
 

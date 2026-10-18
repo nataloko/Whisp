@@ -24,6 +24,23 @@ pub struct Look {
     pub heading_sizes: [u32; 3],
 }
 
+impl Look {
+    /// The colour for a colour table index, as used in `Attr::color`.
+    pub fn color(&self, index: u8) -> Rgb {
+        match index {
+            SYMBOL => self.symbol,
+            HEADING => self.heading,
+            LINK => self.link,
+            LIST => self.list,
+            CHECKED => self.checked,
+            COMMENT => self.comment,
+            QUOTE => self.quote,
+            CODE_BACKGROUND => self.code_background,
+            _ => self.text,
+        }
+    }
+}
+
 // Colour table indices (\cfN, \highlightN), in `Look` field order.
 const TEXT: u8 = 1;
 const SYMBOL: u8 = 2;
@@ -36,7 +53,7 @@ const QUOTE: u8 = 8;
 const CODE_BACKGROUND: u8 = 9;
 
 /// Character attributes of one UTF-16 unit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Attr {
     pub bold: bool,
     pub italic: bool,

@@ -4,6 +4,7 @@
 // them everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod lines;
 mod markdown;
 mod notes;
 mod rtf;
