@@ -284,9 +284,12 @@ impl App {
         };
         self.style_popup(popup);
         let count = rows.len();
+        // A command typed in full is the one highlighted, not the first row.
+        let lower = word.to_lowercase();
+        let exact = rows.iter().position(|&(command, _)| command == lower);
         *self.suggest_rows.borrow_mut() = rows;
         send(popup.list, LB_SETCOUNT, count, 0);
-        send(popup.list, LB_SETCURSEL, 0, 0);
+        send(popup.list, LB_SETCURSEL, exact.unwrap_or(0), 0);
         self.place_popup(popup, count, x, top, bottom);
         self.suggest_open.set(true);
     }
@@ -366,20 +369,26 @@ impl App {
             VK_UP => self.move_suggestion(-1),
             VK_DOWN => self.move_suggestion(1),
             VK_ESCAPE => self.hide_suggestions(),
-            // Whisp accepts with Enter and Space; Tab accepts too, as in most
-            // suggestion lists. All insert a space after an insert command.
-            VK_RETURN | VK_TAB if !shift => {
+            // Tab completes to the highlighted suggestion, as in most
+            // suggestion lists.
+            VK_TAB if !shift => {
                 let selected = send(popup.list, LB_GETCURSEL, 0, 0).max(0) as usize;
                 self.accept_suggestion(selected);
             }
-            VK_SPACE if !shift => {
+            // Enter and Space run a command typed in full, and otherwise
+            // accept the highlighted suggestion. Whisp always accepts the top
+            // suggestion, so ::time gave a timestamp and a typed ::roll(4d6)
+            // only selected its argument.
+            VK_RETURN | VK_SPACE if !shift => {
                 // Space right after a bare "::" just types the space, as in Whisp.
-                if self.token_before_caret() == "::" {
+                if key == VK_SPACE && self.token_before_caret() == "::" {
                     self.hide_suggestions();
                     return None;
                 }
-                let selected = send(popup.list, LB_GETCURSEL, 0, 0).max(0) as usize;
-                self.accept_suggestion(selected);
+                if !self.expand_at_caret(if key == VK_SPACE { " " } else { "\n" }) {
+                    let selected = send(popup.list, LB_GETCURSEL, 0, 0).max(0) as usize;
+                    self.accept_suggestion(selected);
+                }
             }
             _ => return None,
         }
