@@ -47,6 +47,20 @@ pub fn highlight(text: &str) -> Vec<Span> {
     out
 }
 
+/// Styles for one line (without its line break), given whether a code
+/// fence is open at its start, with offsets from the line's start. Also
+/// returns whether a fence is open after it: the only state that carries
+/// from one line to the next. Concatenating these per line and sorting by
+/// style gives `highlight`'s result.
+pub fn highlight_line(line: &str, in_fence: bool) -> (Vec<Span>, bool) {
+    let mut out = Vec::new();
+    let chars: Vec<char> = line.chars().collect();
+    let mut spans = Spans::new(&chars, 0, &mut out);
+    let after = block(&chars, in_fence, &mut spans);
+    out.sort_by_key(|s| rank(s.style));
+    (out, after)
+}
+
 fn rank(style: Style) -> u8 {
     match style {
         Style::Heading(_) => 0,

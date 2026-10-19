@@ -34,8 +34,8 @@ pub struct Editor {
     /// Text Object Model access, to style ranges without moving the
     /// selection and to keep formatting out of the undo stack.
     doc: Option<ITextDocument>,
-    /// Signatures of the lines as currently styled.
-    styled: RefCell<Vec<u64>>,
+    /// The state of the lines as currently styled, for incremental restyles.
+    styled: RefCell<Vec<lines::State>>,
 }
 
 /// SendMessageW for RichEdit messages.
@@ -200,7 +200,7 @@ impl Editor {
         let expected = to_cr(text);
         let look = look(theme);
         let document = rtf::document(text, &spans, &look);
-        let lines = lines::lines(&expected, &spans);
+        let (states, lines) = lines::full(&expected);
         // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
@@ -217,7 +217,7 @@ impl Editor {
                 self.stream_in(&bytes, SF_TEXT | SF_UNICODE);
                 self.style_lines(&lines, &look);
             }
-            *self.styled.borrow_mut() = lines.iter().map(|l| l.signature).collect();
+            *self.styled.borrow_mut() = states;
             send(self.hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
             let end = self.len() as i32;
             let caret = CHARRANGE {
@@ -287,26 +287,30 @@ impl Editor {
     pub fn restyle_changes(&self, theme: &Theme, convert: bool) -> bool {
         let started = Instant::now();
         let units = self.text_utf16();
-        let text = String::from_utf16_lossy(&units);
-        let spans = markdown::highlight(&text);
-        let lines = lines::lines(&units, &spans);
-        let signatures: Vec<u64> = lines.iter().map(|l| l.signature).collect();
-        let changed = lines::changed(&self.styled.borrow(), &signatures);
-        if convert && !changed.is_empty() {
+        // Parses only the edited lines, and the lines after them whose code
+        // fence state changed.
+        let update = lines::update(&self.styled.borrow(), &units);
+        let edited_has_box = update.edited.clone().any(|k| {
+            let line = &update.lines[k - update.parsed.start];
+            units[line.start..line.start + line.len].contains(&u16::from(b'['))
+        });
+        if convert && edited_has_box {
             // One unit per break either way, so offsets stay the same.
-            let text = notes::to_lf(&text);
+            let text = notes::to_lf(&String::from_utf16_lossy(&units));
             let text_lines: Vec<&str> = text.split('\n').collect();
             let caret = lists::position16(&text_lines, self.selection().0);
-            if let Some(edit) = lists::convert_checkboxes(&text_lines, changed.clone(), caret) {
+            if let Some(edit) = lists::convert_checkboxes(&text_lines, update.edited.clone(), caret)
+            {
                 self.apply_edit(&text_lines, &edit);
                 return true;
             }
         }
-        let runs = self.style_lines(&lines[changed.clone()], &look(theme));
-        *self.styled.borrow_mut() = signatures;
+        let runs = self.style_lines(&update.lines, &look(theme));
+        let parsed = update.parsed.len();
+        *self.styled.borrow_mut() = update.state;
         let report = format!(
-            "whisp: restyle {} lines, {runs} runs, {:.2} ms\n",
-            changed.len(),
+            "whisp: restyle {parsed} lines, {parsed} parsed of {}, {runs} runs, {:.2} ms\n",
+            self.styled.borrow().len(),
             started.elapsed().as_secs_f64() * 1000.0
         );
         // SAFETY: `report` outlives the call.
