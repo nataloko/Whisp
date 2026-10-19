@@ -276,6 +276,26 @@ impl Editor {
         };
     }
 
+    /// Replaces `start..end` with `text` (`\n` breaks) through a plain text
+    /// stream into the selection, as one undo step. EM_REPLACESEL is very
+    /// slow on text split into many formatted runs (21 s for 254 KB of
+    /// highlighted Markdown in the VM); the stream takes 0.5 s and ignores
+    /// the runs. The restyle that follows formats the new text.
+    pub(super) fn stream_replace(&self, start: usize, end: usize, text: &str) {
+        let range = CHARRANGE {
+            cpMin: start as i32,
+            cpMax: end as i32,
+        };
+        let bytes: Vec<u8> = to_cr(text)
+            .into_iter()
+            .filter(|&u| u != 0)
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        // SAFETY: `range` outlives the call.
+        unsafe { send(self.hwnd, EM_EXSETSEL, 0, &range as *const _ as isize) };
+        self.stream_in(&bytes, SF_TEXT | SF_UNICODE | SFF_SELECTION);
+    }
+
     /// Restyles the lines whose text or styles changed since they were last
     /// styled, without moving the selection. Formatting stays out of the
     /// undo stack and sends no change notifications.
@@ -465,27 +485,6 @@ impl Editor {
             send(self.hwnd, EM_SETEVENTMASK, 0, mask);
         }
         runs
-    }
-
-    /// Gives `start..end` the base format, outside the undo history, ahead
-    /// of a large replacement: RichEdit replaces text split into thousands
-    /// of formatted runs very slowly (20.7 s for 254 KB in the VM, 6.4 s
-    /// with this). Every line the range touches changes text, so the
-    /// restyle after the replacement, or after undoing it, formats it again.
-    pub(super) fn clear_format(&self, start: usize, end: usize, theme: &Theme) {
-        let Some(doc) = &self.doc else { return };
-        // SAFETY: TOM calls on the document of our own control.
-        unsafe {
-            let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
-            let _ = doc.Freeze();
-            let _ = doc.Undo(tomSuspend.0);
-            if let Some(font) = font(doc, start, end) {
-                reset(&font, &look(theme));
-            }
-            let _ = doc.Undo(tomResume.0);
-            let _ = doc.Unfreeze();
-            send(self.hwnd, EM_SETEVENTMASK, 0, mask);
-        }
     }
 
     /// Resets all text to the base format and sets the default format.
