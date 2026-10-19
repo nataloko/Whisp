@@ -21,6 +21,9 @@ const MAX_INDENT: i64 = 40;
 const DEFAULT_CHAR_WIDTH: f64 = 20.0;
 /// How far a pair of words may be from a pitch and still agree with it.
 const PITCH_TOLERANCE: f64 = 0.12;
+/// Neighbouring words closer than this many character widths, with
+/// punctuation where they meet, are one word the OCR split.
+const JOIN_GAP: f64 = 0.55;
 
 /// The text of `lines` (each a list of words, as the OCR grouped them),
 /// with each line indented by its distance from the leftmost line. `None`
@@ -52,8 +55,12 @@ pub fn reconstruct(lines: &[Vec<Word>]) -> Option<String> {
         // indents into 3 and lost single space indents.
         let indent = ((words[0].1.left - min_left) / space).round() as i64;
         let mut line = " ".repeat(indent.clamp(0, MAX_INDENT) as usize);
-        let texts: Vec<&str> = words.iter().map(|(text, _)| *text).collect();
-        line.push_str(&texts.join(" "));
+        for (i, &(text, word)) in words.iter().enumerate() {
+            if i > 0 && !split_word(words[i - 1], (text, word), space) {
+                line.push(' ');
+            }
+            line.push_str(text);
+        }
         out.push(line);
     }
     let text = out.join("\n");
@@ -148,6 +155,21 @@ fn pitch(lines: &[Vec<(&str, &Word)>]) -> f64 {
         .map(|(text, w)| w.width / text.chars().count() as f64)
         .collect();
     median(widths).unwrap_or(DEFAULT_CHAR_WIDTH)
+}
+
+/// Whether two neighbouring words are one that the OCR split at
+/// punctuation, like `total` `(items):` or `item.` `price`. In the test
+/// images such splits left gaps of at most 0.52 character widths, while real
+/// spaces were at least 0.63 in prose and 1.1 in monospace code.
+/// Punctuation where they meet is also required, so ordinary words are
+/// never run together.
+fn split_word(prev: (&str, &Word), next: (&str, &Word), pitch: f64) -> bool {
+    let gap = next.1.left - (prev.1.left + prev.1.width);
+    let at_punctuation = prev.0.ends_with(['(', '[', '{', '.'])
+        || next
+            .0
+            .starts_with(['(', ')', '[', ']', '{', '}', '.', ',', ';', ':']);
+    at_punctuation && gap < JOIN_GAP * pitch
 }
 
 fn median(mut values: Vec<f64>) -> Option<f64> {
@@ -245,7 +267,7 @@ mod tests {
         ];
         assert_eq!(
             reconstruct(&lines).unwrap(),
-            "print ( item . price )\n    x = 1\n    long_name = 2"
+            "print(item.price)\n    x = 1\n    long_name = 2"
         );
     }
 
@@ -318,7 +340,33 @@ mod tests {
         // overlaps the rest of its line by more than half.
         let mut lines = vec![line(0, &[("total", 0)]), line(0, &[("(items):", 5)])];
         lines[1][0].top += 6.0;
-        assert_eq!(reconstruct(&lines).unwrap(), "total (items):");
+        assert_eq!(reconstruct(&lines).unwrap(), "total(items):");
+    }
+
+    #[test]
+    fn joins_split_words_only_at_punctuation() {
+        /// Two words with `gap` character widths between them.
+        fn pair(a: &str, b: &str, gap: f64) -> Vec<Word> {
+            let mut words = line(0, &[(a, 0), (b, 0)]);
+            words[1].left = words[0].left + words[0].width + gap * 10.0;
+            words
+        }
+        // A second line of evenly spaced words fixes the pitch at 10 px.
+        let text = |a, b, gap| {
+            let anchor = line(1, &[("aaaa", 0), ("bbbb", 5), ("cccc", 10), ("dddd", 15)]);
+            let text = reconstruct(&[pair(a, b, gap), anchor]).unwrap();
+            text.lines().next().unwrap().to_string()
+        };
+        // Splits seen with Windows OCR in code.
+        assert_eq!(text("total", "(items):", 0.35), "total(items):");
+        assert_eq!(text("item.", "price", 0.45), "item.price");
+        assert_eq!(text("baz)", ".qux", 0.52), "baz).qux");
+        // Real spaces in prose, even tight ones after punctuation.
+        assert_eq!(text("left;", "the", 0.63), "left; the");
+        assert_eq!(text("Hello,", "world.", 0.79), "Hello, world.");
+        assert_eq!(text("email", "(if", 0.75), "email (if");
+        // Ordinary words stay apart however close.
+        assert_eq!(text("no", "files", 0.2), "no files");
     }
 
     #[test]
