@@ -443,7 +443,11 @@ fn convert_line(line: &str) -> Option<(usize, String)> {
     let trailing = usize::from(after.starts_with(char::is_whitespace));
     let len = indent + 1 + (chars(&rest[1..]) - chars(after_bullet)) + 1 + inner_len + 1 + trailing;
     let mark = if checked { CHECKED_BOX } else { EMPTY_BOX };
-    Some((len, format!("{}{mark} ", take(line, indent))))
+    // Whisp always writes the box with a space after it. Converting as soon
+    // as `]` is typed, that space plus the one typed next made two, so the
+    // space is kept only when one was already there.
+    let space = if trailing == 1 { " " } else { "" };
+    Some((len, format!("{}{mark}{space}", take(line, indent))))
 }
 
 /// The UTF-16 offset of `(line, column)`, with one unit per line break.
@@ -731,14 +735,26 @@ mod tests {
         let lines: Vec<&str> = t.split('\n').collect();
         let edit = convert_checkboxes(&lines, 0..5, (2, 5)).unwrap();
         let (out, caret) = apply(t, &edit);
-        assert_eq!(out, "a\n  \u{2610} x\n\u{2611} \n\u{2610} y\n\u{2610} z");
-        assert_eq!(caret, (2, 2));
+        // A space after the box only where one was already there.
+        assert_eq!(out, "a\n  \u{2610} x\n\u{2611}\n\u{2610} y\n\u{2610}z");
+        assert_eq!(caret, (2, 1));
         // Lines outside the range are left alone.
         assert!(convert_checkboxes(&lines, 0..1, (0, 0)).is_none());
         assert!(
             convert_checkboxes(&["- [y]", "x [ ]", "-[ ]"], 0..3, (0, 0))
                 .is_some_and(|e| e.start.0 == 2)
         );
+    }
+
+    #[test]
+    fn typing_a_checkbox_leaves_one_space() {
+        // Converted as soon as `]` is typed, with the caret at the end...
+        let edit = convert_checkboxes(&["- [ ]"], 0..1, (0, 5)).unwrap();
+        let (out, caret) = apply("- [ ]", &edit);
+        assert_eq!((out.as_str(), caret), ("\u{2610}", (0, 1)));
+        // ...so the space typed next is the only one.
+        let edit = convert_checkboxes(&["- [ ] task"], 0..1, (0, 10)).unwrap();
+        assert_eq!(apply("- [ ] task", &edit).0, "\u{2610} task");
     }
 
     #[test]
