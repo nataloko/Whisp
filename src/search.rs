@@ -27,6 +27,8 @@ struct Entry {
     lower: String,
     title: String,
     excerpt: String,
+    /// The note's tags, see `tags`.
+    tags: String,
 }
 
 /// A snippet around a match, in three parts so the match can be
@@ -46,13 +48,17 @@ pub enum Row {
         path: PathBuf,
         title: String,
         excerpt: String,
+        /// `#a #b`, or empty.
+        tags: String,
     },
     /// One match in a note's body. Only a note's first match row has the
-    /// title. `start` and `end` are UTF-16 offsets in the note text, which
+    /// title and tags. `start` and `end` are UTF-16 offsets in the note text, which
     /// are RichEdit's offsets too, as each `\n` becomes one `\r`.
     Match {
         path: PathBuf,
         title: Option<String>,
+        /// Empty except with the title.
+        tags: String,
         snippet: Snippet,
         start: usize,
         end: usize,
@@ -144,6 +150,7 @@ impl Entry {
             lower: lower(&text),
             title: title(&text),
             excerpt: excerpt(&text),
+            tags: tags(&text),
             text,
         }
     }
@@ -153,6 +160,7 @@ impl Entry {
             path: self.path.clone(),
             title: self.title.clone(),
             excerpt: self.excerpt.clone(),
+            tags: self.tags.clone(),
         }
     }
 
@@ -173,6 +181,11 @@ impl Entry {
             rows.push(Row::Match {
                 path: self.path.clone(),
                 title: first.then(|| self.title.clone()),
+                tags: if first {
+                    self.tags.clone()
+                } else {
+                    String::new()
+                },
                 snippet: snippet(&self.text, start.byte, end.byte),
                 start: start.units,
                 end: end.units,
@@ -191,6 +204,28 @@ fn lower(text: &str) -> String {
 
 fn lower_len(c: char) -> usize {
     c.to_lowercase().map(char::len_utf8).sum()
+}
+
+/// The UTF-16 ranges (RichEdit offsets) of the non overlapping matches of
+/// `query` in `text`, found the way the search finds them. Empty for an
+/// empty query.
+pub fn match_ranges(text: &str, query: &str) -> Vec<(usize, usize)> {
+    let query = lower(query);
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let lowered = lower(text);
+    let mut walker = Walker::new(text);
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lowered[from..].find(&query) {
+        let at = from + found;
+        from = at + query.len();
+        let start = walker.floor(at).units;
+        let end = walker.clone().ceil(from).units;
+        ranges.push((start, end));
+    }
+    ranges
 }
 
 /// A character boundary in the original text: byte and UTF-16 offsets.
@@ -311,6 +346,33 @@ pub fn title(text: &str) -> String {
     }
 }
 
+/// The tags of a note as `#a #b`: every `#` followed by word characters
+/// (letters, digits, underscore) gives the longest such run, as Whisp's
+/// `#(\w+)`. First appearance order, no duplicates, case sensitive.
+fn tags(text: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('#') {
+        rest = &rest[at + 1..];
+        let len = rest.find(|c| !word(c)).unwrap_or(rest.len());
+        let (tag, after) = rest.split_at(len);
+        if !tag.is_empty() && !found.contains(&tag) {
+            found.push(tag);
+        }
+        rest = after;
+    }
+    let mut out = String::new();
+    for tag in found {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push('#');
+        out.push_str(tag);
+    }
+    out
+}
+
 /// The body on one line, cut to `EXCERPT_CHARS`; empty for a title only note.
 fn excerpt(text: &str) -> String {
     let body = text.split_once('\n').map_or("", |(_, body)| body);
@@ -391,6 +453,72 @@ mod tests {
     }
 
     #[test]
+    fn tags_follow_whisps_pattern() {
+        assert_eq!(tags("no tags here"), "");
+        assert_eq!(tags("# Heading\n#todo and #idea"), "#todo #idea");
+        assert_eq!(tags("##tag"), "#tag");
+        assert_eq!(tags("C#sharp"), "#sharp");
+        assert_eq!(tags("#a #b #a"), "#a #b");
+        assert_eq!(tags("#a #A"), "#a #A", "case sensitive");
+        assert_eq!(tags("#a#b"), "#a #b");
+        assert_eq!(tags("#snake_case-more"), "#snake_case");
+        assert_eq!(tags("# \n#"), "");
+        assert_eq!(tags("#été #日本語 #Ünï2"), "#été #日本語 #Ünï2");
+        assert_eq!(tags("(#x)"), "#x");
+    }
+
+    #[test]
+    fn tags_go_on_the_title_rows_only() {
+        let index = index_of(&[("a.md", "T #t\nfoo foo")]);
+        let rows = index.search("foo", 500);
+        let tags_of: Vec<&str> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Match { tags, .. } => tags.as_str(),
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(tags_of, ["#t", ""]);
+        let Row::Note { tags, .. } = &index.search("", 500)[0] else {
+            panic!()
+        };
+        assert_eq!(tags, "#t");
+    }
+
+    #[test]
+    fn match_ranges_use_the_search_folding() {
+        let ranges = |text: &str, q: &str| match_ranges(text, q);
+        assert_eq!(
+            ranges("Apple apple APPLE", "ApPlE"),
+            [(0, 5), (6, 11), (12, 17)]
+        );
+        assert_eq!(ranges("anything", ""), []);
+        assert_eq!(ranges("anything", "zzz"), []);
+        // Non overlapping.
+        assert_eq!(ranges("aaaa", "aa"), [(0, 2), (2, 4)]);
+        // The emoji is two UTF-16 units; ß and İ change length when lowered.
+        let text = "😀 STRASSE straße İx";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let at = |(s, e): (usize, usize)| String::from_utf16(&units[s..e]).unwrap();
+        let found = ranges(text, "strasse");
+        assert_eq!(found.len(), 1);
+        assert_eq!(at(found[0]), "STRASSE");
+        let found = ranges(text, "straße");
+        assert_eq!(found.iter().map(|r| at(*r)).collect::<Vec<_>>(), ["straße"]);
+        let found = ranges(text, "i");
+        assert_eq!(at(*found.last().unwrap()), "İ");
+        let found = ranges(text, "😀 s");
+        assert_eq!(at(found[0]), "😀 S");
+        // Agrees with the search rows, which count the first line out.
+        let index = index_of(&[("a.md", "t\nİstanbul STRASSE")]);
+        let rows = matches(&index, "strasse");
+        assert_eq!(
+            ranges("t\nİstanbul STRASSE", "strasse"),
+            [(rows[0].1, rows[0].2)]
+        );
+    }
+
+    #[test]
     fn empty_query_lists_every_note_newest_first() {
         let index = index_of(&[("a.md", "# A\nbody a"), ("b.md", "B")]);
         let rows = index.search("", 500);
@@ -400,12 +528,14 @@ mod tests {
                 Row::Note {
                     path: "a.md".into(),
                     title: "A".into(),
-                    excerpt: "body a".into()
+                    excerpt: "body a".into(),
+                    tags: String::new()
                 },
                 Row::Note {
                     path: "b.md".into(),
                     title: "B".into(),
-                    excerpt: String::new()
+                    excerpt: String::new(),
+                    tags: String::new()
                 },
             ]
         );

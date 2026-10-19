@@ -370,6 +370,7 @@ impl App {
         };
         // Leaving the current note, as `go` does.
         self.hide_suggestions();
+        self.clear_highlight();
         let removed = self.drop_if_blank();
         let index = if removed && side == Side::Newer {
             index - 1

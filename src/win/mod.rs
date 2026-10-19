@@ -537,6 +537,13 @@ impl App {
         Some(LRESULT(0))
     }
 
+    /// Removes the search highlight from the editors, if any.
+    pub(super) fn clear_highlight(&self) {
+        for editor in self.editors.iter().filter_map(OnceCell::get) {
+            canvas::set_highlight(editor.hwnd, None);
+        }
+    }
+
     /// The current editor.
     fn editor(&self) -> &Editor {
         self.editors[self.active.get()]
@@ -597,6 +604,7 @@ impl App {
             return;
         }
         self.dirty.set(true);
+        self.clear_highlight();
         // SAFETY: a timer and a posted message to our own window; restarting
         // the timer resets its delay.
         unsafe {
@@ -705,6 +713,7 @@ impl App {
     /// cannot be read are dropped from the list.
     fn show(&self, index: usize) {
         self.hide_suggestions();
+        self.clear_highlight();
         let text = loop {
             let path = self.notes.borrow().get(index).cloned();
             match path.map(|p| notes::read(&p)) {
@@ -846,6 +855,8 @@ impl App {
                 return used;
             }
             match key {
+                // Esc first clears a search highlight; with none it goes on.
+                VK_ESCAPE if canvas::has_highlight(self.editor().hwnd) => self.clear_highlight(),
                 VK_INSERT if shift => self.paste(),
                 // Backspace on a lone box in a list note removes the line.
                 VK_BACK if !shift => return self.backspace_key(),

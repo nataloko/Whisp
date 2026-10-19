@@ -21,6 +21,8 @@ pub struct Theme {
     pub code_background: COLORREF,
     /// Selected rows in lists.
     pub selection: COLORREF,
+    /// Background of search matches in the opened note.
+    pub highlight: COLORREF,
 }
 
 /// 0xRRGGBB to a COLORREF, which is 0x00BBGGRR.
@@ -41,6 +43,7 @@ const DARK: Theme = Theme {
     quote: rgb(0x9da5b4),
     code_background: rgb(0x323232),
     selection: rgb(0x3a3d41),
+    highlight: rgb(0x5c5410),
 };
 
 const LIGHT: Theme = Theme {
@@ -56,6 +59,7 @@ const LIGHT: Theme = Theme {
     quote: rgb(0x5c6370),
     code_background: rgb(0xe6e6e6),
     selection: rgb(0xdde7f3),
+    highlight: rgb(0xf9f06b),
 };
 
 impl Theme {

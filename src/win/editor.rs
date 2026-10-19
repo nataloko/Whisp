@@ -102,8 +102,9 @@ impl Editor {
             } else {
                 // EM_GETOLEINTERFACE hands over a reference to IRichEditOle.
                 let ole = IUnknown::from_raw(ole);
-                canvas::attach(hwnd, text_services(&ole));
-                ole.cast::<ITextDocument>().ok()
+                let doc = ole.cast::<ITextDocument>().ok();
+                canvas::attach(hwnd, text_services(&ole), doc.clone());
+                doc
             };
             Ok(Editor {
                 hwnd,
@@ -462,16 +463,7 @@ impl Editor {
     /// Screen coordinates of the character at `offset`: its left edge, and
     /// the top and bottom of its line. `None` when it is not on screen.
     pub(super) fn char_box(&self, offset: usize) -> Option<(i32, i32, i32)> {
-        let doc = self.doc.as_ref()?;
-        let (mut x, mut top, mut bottom) = (0, 0, 0);
-        // SAFETY: plain TOM calls; the out pointers are live locals.
-        unsafe {
-            let range = doc.Range(offset as i32, offset as i32).ok()?;
-            let at = |align: TEXT_ALIGN_OPTIONS| tomConstants(tomStart.0 | align.0 as i32);
-            range.GetPoint(at(TA_TOP), &mut x, &mut top).ok()?;
-            range.GetPoint(at(TA_BOTTOM), &mut x, &mut bottom).ok()?;
-        }
-        Some((x, top, bottom))
+        char_point(self.doc.as_ref()?, offset)
     }
 
     /// Replaces the edit's range with one EM_REPLACESEL, then places the
@@ -655,6 +647,20 @@ impl Editor {
         // SAFETY: `text` is NUL terminated and outlives the call.
         unsafe { send(self.hwnd, EM_REPLACESEL, 1, text.as_ptr() as isize) };
     }
+}
+
+/// Screen coordinates of the character at `offset` in `doc`: its left edge,
+/// and the top and bottom of its line.
+pub(super) fn char_point(doc: &ITextDocument, offset: usize) -> Option<(i32, i32, i32)> {
+    let (mut x, mut top, mut bottom) = (0, 0, 0);
+    // SAFETY: plain TOM calls; the out pointers are live locals.
+    unsafe {
+        let range = doc.Range(offset as i32, offset as i32).ok()?;
+        let at = |align: TEXT_ALIGN_OPTIONS| tomConstants(tomStart.0 | align.0 as i32);
+        range.GetPoint(at(TA_TOP), &mut x, &mut top).ok()?;
+        range.GetPoint(at(TA_BOTTOM), &mut x, &mut bottom).ok()?;
+    }
+    Some((x, top, bottom))
 }
 
 /// The control's ITextServices, which draws it. Msftedit's interface ID

@@ -13,7 +13,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
-use super::{App, is_character_key, scale};
+use super::theme::Theme;
+use super::{App, canvas, is_character_key, scale};
 use crate::search::Row;
 
 pub(super) const TIMER_SEARCH: usize = 5;
@@ -134,6 +135,7 @@ impl App {
         }
         self.finish_swipe();
         self.hide_suggestions();
+        self.clear_highlight();
         // Saved first, so the index sees the current note as it is.
         self.flush();
         if self.search.get().is_none() {
@@ -437,6 +439,9 @@ impl App {
             Some(Row::More) | None => return,
         };
         let (path, selection) = target;
+        let query = self
+            .search_panel()
+            .map_or_else(String::new, |p| window_text(p.edit));
         if !self.flush() {
             return;
         }
@@ -448,6 +453,9 @@ impl App {
         self.close_search();
         if let Some((start, end)) = selection {
             self.editor().select(start, end);
+        }
+        if !query.is_empty() {
+            canvas::set_highlight(self.editor().hwnd, Some(query));
         }
     }
 
@@ -522,14 +530,40 @@ impl App {
             let old = SelectObject(hdc, normal.into());
             let rows = self.search_rows.borrow();
             match rows.get(item.itemID as usize) {
-                Some(Row::Note { title, excerpt, .. }) => {
-                    draw_text(hdc, bold, title, line_rect(0, 0), theme.text);
+                Some(Row::Note {
+                    title,
+                    excerpt,
+                    tags,
+                    ..
+                }) => {
+                    draw_title(
+                        hdc,
+                        [bold, normal],
+                        title,
+                        tags,
+                        line_rect(0, 0),
+                        &theme,
+                        dpi,
+                    );
                     draw_text(hdc, normal, excerpt, line_rect(1, 0), theme.quote);
                 }
-                Some(Row::Match { title, snippet, .. }) => {
+                Some(Row::Match {
+                    title,
+                    tags,
+                    snippet,
+                    ..
+                }) => {
                     let rect = match title {
                         Some(title) => {
-                            draw_text(hdc, bold, title, line_rect(0, 0), theme.text);
+                            draw_title(
+                                hdc,
+                                [bold, normal],
+                                title,
+                                tags,
+                                line_rect(0, 0),
+                                &theme,
+                                dpi,
+                            );
                             line_rect(1, 0)
                         }
                         // Further matches of the same note: indented, centred.
@@ -578,6 +612,67 @@ impl App {
             SelectObject(hdc, old);
         }
     }
+}
+
+/// The width of `text` in `font`.
+fn text_width(hdc: HDC, font: HFONT, text: &str) -> i32 {
+    let units = utf16(text);
+    let mut size = SIZE::default();
+    // SAFETY: measuring in a DC we were given; the caller restores its font.
+    unsafe {
+        SelectObject(hdc, font.into());
+        let _ = GetTextExtentPoint32W(hdc, &units, &mut size);
+    }
+    size.cx
+}
+
+/// A note's title line: the title in bold, then its tags dimmed after a
+/// small gap. A line that is too narrow shortens the title first, down to
+/// half the line, and cuts the tags at the right edge.
+fn draw_title(
+    hdc: HDC,
+    [bold, normal]: [HFONT; 2],
+    title: &str,
+    tags: &str,
+    rect: RECT,
+    theme: &Theme,
+    dpi: u32,
+) {
+    if tags.is_empty() {
+        draw_text(hdc, bold, title, rect, theme.text);
+        return;
+    }
+    let gap = scale(8, dpi);
+    let available = rect.right - rect.left;
+    let title_width = text_width(hdc, bold, title);
+    let tags_width = text_width(hdc, normal, tags);
+    let allotted = if title_width + gap + tags_width <= available {
+        title_width
+    } else {
+        (available - gap - tags_width)
+            .max(available / 2)
+            .min(title_width)
+    };
+    draw_text(
+        hdc,
+        bold,
+        title,
+        RECT {
+            right: rect.left + allotted,
+            ..rect
+        },
+        theme.text,
+    );
+    draw_text(
+        hdc,
+        normal,
+        tags,
+        RECT {
+            left: rect.left + allotted + gap,
+            ..rect
+        },
+        theme.quote,
+    );
 }
 
 /// One line of text in `rect`, cut with `…` if too long.
