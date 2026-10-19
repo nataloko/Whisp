@@ -344,7 +344,11 @@ impl Editor {
         let mut range = CHARRANGE::default();
         // SAFETY: `range` outlives the call.
         unsafe { send(self.hwnd, EM_EXGETSEL, 0, &mut range as *mut _ as isize) };
-        (range.cpMin.max(0) as usize, range.cpMax.max(0) as usize)
+        // A selection reaching the end (Shift+End on the last line, Ctrl+A)
+        // takes in the final paragraph mark, one past the text.
+        let len = self.len();
+        let end = (range.cpMax.max(0) as usize).min(len);
+        ((range.cpMin.max(0) as usize).min(end), end)
     }
 
     /// Runs a list action (see `lists`) at the caret, or at the start of

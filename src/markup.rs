@@ -29,7 +29,12 @@ fn units(s: &str) -> Vec<u16> {
 /// - no selection: an empty pair around the caret is removed, a marker
 ///   right after the caret is stepped over, otherwise an empty pair goes in
 ///   with the caret inside.
-pub fn wrap(text: &[u16], (start, end): (usize, usize), marker: &str) -> Wrap {
+pub fn wrap(text: &[u16], (start, mut end): (usize, usize), marker: &str) -> Wrap {
+    // RichEdit's Shift+End selects the line break too (GTK's does not); the
+    // markers go inside it.
+    while end > start && matches!(text.get(end - 1), Some(0x0a | 0x0b | 0x0d)) {
+        end -= 1;
+    }
     let m = units(marker);
     let n = m.len();
     if start == end {
@@ -399,5 +404,24 @@ mod tests {
         assert_eq!(export_name("!!!\nsecond"), "note.md");
         assert_eq!(export_name(""), "note.md");
         assert_eq!(export_name("Café au lait"), "caf-au-lait.md");
+    }
+
+    #[test]
+    fn wrap_leaves_a_selected_line_break_outside() {
+        let text: Vec<u16> = "**x**\rnext".encode_utf16().collect();
+        // Home, Shift+End in RichEdit: the line and its break.
+        match wrap(&text, (0, 6), "**") {
+            Wrap::Edit {
+                start, end, text, ..
+            } => assert_eq!((start, end, text.as_str()), (0, 5, "x")),
+            Wrap::Caret(_) => panic!("expected an unwrap"),
+        }
+        let text: Vec<u16> = "word\rnext".encode_utf16().collect();
+        match wrap(&text, (0, 5), "*") {
+            Wrap::Edit {
+                start, end, text, ..
+            } => assert_eq!((start, end, text.as_str()), (0, 4, "*word*")),
+            Wrap::Caret(_) => panic!("expected a wrap"),
+        }
     }
 }
