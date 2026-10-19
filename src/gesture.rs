@@ -23,8 +23,6 @@ pub const RUBBER_BAND_DIVISOR: f64 = 3.0;
 pub const RUBBER_BAND_MAX: f64 = 0.15;
 /// Length of the animation to the neighbour or back.
 pub const SETTLE_MS: u64 = 200;
-/// Animation frame interval, near 60 Hz.
-pub const FRAME_MS: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {

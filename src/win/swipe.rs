@@ -2,7 +2,12 @@
 //! and a second, hidden "peek" editor shows the neighbour note beside it.
 //! On commit the two editors swap roles, so nothing reloads on screen.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -15,7 +20,16 @@ use crate::notes;
 
 /// Fires when no horizontal wheel event came for `gesture::END_MS`.
 pub(super) const TIMER_SWIPE_END: usize = 2;
-pub(super) const TIMER_SWIPE_FRAME: usize = 3;
+/// Posted by the frame pacer once per display refresh while settling.
+pub(super) const WM_SWIPE_FRAME: u32 = WM_APP + 2;
+
+/// Paces the settle animation: a thread posts WM_SWIPE_FRAME once per
+/// display refresh, one at a time. Window timers tick only every 15.6 ms
+/// or 31 ms, which made the animation uneven.
+pub(super) struct Pacer {
+    running: AtomicBool,
+    posted: AtomicBool,
+}
 
 pub(super) enum SwipeState {
     Idle,
@@ -72,8 +86,7 @@ impl App {
         let mut swipe = match self.swipe.replace(SwipeState::Idle) {
             SwipeState::Tracking(swipe) => swipe,
             SwipeState::Settling { settle, .. } => {
-                // SAFETY: plain call.
-                let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_SWIPE_FRAME) };
+                self.stop_frames();
                 let (older, newer) = self.neighbours();
                 Swipe::resume(width, older, newer, settle.at(now).0, now)
             }
@@ -176,31 +189,25 @@ impl App {
     }
 
     pub(super) fn swipe_timer(&self, id: usize) {
-        match id {
-            TIMER_SWIPE_END => {
-                let now = self.now();
-                if let SwipeState::Tracking(swipe) = &*self.swipe.borrow()
-                    && !swipe.ended(now)
-                {
-                    // Timers can fire early; wait for the rest.
-                    return;
-                }
-                self.end_swipe(true);
-            }
-            TIMER_SWIPE_FRAME => self.swipe_frame(),
-            _ => {}
+        if id != TIMER_SWIPE_END {
+            return;
         }
+        if let SwipeState::Tracking(swipe) = &*self.swipe.borrow()
+            && !swipe.ended(self.now())
+        {
+            // Timers can fire early; wait for the rest.
+            return;
+        }
+        self.end_swipe(true);
     }
 
     /// Ends the gesture: decides where it goes and animates there, or with
     /// `animate` false goes there at once. Ending an animation finishes it.
     fn end_swipe(&self, animate: bool) {
         let now = self.now();
-        // SAFETY: plain calls.
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_SWIPE_END);
-            let _ = KillTimer(Some(self.hwnd), TIMER_SWIPE_FRAME);
-        }
+        // SAFETY: plain call.
+        let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_SWIPE_END) };
+        self.stop_frames();
         match self.swipe.replace(SwipeState::Idle) {
             SwipeState::Idle => {}
             SwipeState::Tracking(swipe) => {
@@ -235,8 +242,7 @@ impl App {
                     last_frame: now,
                     slowest: 0,
                 });
-                // SAFETY: plain call.
-                unsafe { SetTimer(Some(self.hwnd), TIMER_SWIPE_FRAME, gesture::FRAME_MS, None) };
+                self.start_frames();
             }
             SwipeState::Settling {
                 target,
@@ -264,11 +270,64 @@ impl App {
                 *last_frame = now;
                 settle.at(now)
             }
-            _ => (0.0, true),
+            // A frame posted before the animation ended.
+            _ => return,
         };
         self.place(offset);
         if done {
             self.end_swipe(false);
+        }
+    }
+
+    /// WM_SWIPE_FRAME from the pacer.
+    pub(super) fn swipe_frame_message(&self) {
+        if let Some(pacer) = &*self.pacer.borrow() {
+            pacer.posted.store(false, Ordering::Release);
+        }
+        self.swipe_frame();
+    }
+
+    fn start_frames(&self) {
+        if self.pacer.borrow().is_some() {
+            return;
+        }
+        let pacer = Arc::new(Pacer {
+            running: AtomicBool::new(true),
+            posted: AtomicBool::new(false),
+        });
+        let shared = Arc::clone(&pacer);
+        let period = refresh_period();
+        // HWND is not Send; the raw value is only used to post to our window.
+        let hwnd = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            // Sleeping until each deadline rather than for a fixed time keeps
+            // errors from adding up. Rust's sleep uses a high resolution
+            // timer on Windows.
+            let mut next = Instant::now() + period;
+            while shared.running.load(Ordering::Acquire) {
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                next += period;
+                if shared.running.load(Ordering::Acquire)
+                    && !shared.posted.swap(true, Ordering::AcqRel)
+                {
+                    // SAFETY: plain call; posting to a destroyed window fails.
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(HWND(hwnd as *mut _)),
+                            WM_SWIPE_FRAME,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                    };
+                }
+            }
+        });
+        self.pacer.replace(Some(pacer));
+    }
+
+    pub(super) fn stop_frames(&self) {
+        if let Some(pacer) = self.pacer.take() {
+            pacer.running.store(false, Ordering::Release);
         }
     }
 
@@ -283,11 +342,9 @@ impl App {
     /// Drops a gesture without moving, as on a resize.
     pub(super) fn cancel_swipe(&self) {
         if !matches!(self.swipe.replace(SwipeState::Idle), SwipeState::Idle) {
-            // SAFETY: plain calls.
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_SWIPE_END);
-                let _ = KillTimer(Some(self.hwnd), TIMER_SWIPE_FRAME);
-            }
+            // SAFETY: plain call.
+            let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_SWIPE_END) };
+            self.stop_frames();
             debug("whisp: swipe cancelled by a resize\n".to_string());
         }
     }
@@ -389,6 +446,24 @@ impl App {
             msg.hwnd = self.editor().hwnd;
         }
     }
+}
+
+/// The display refresh period, 60 Hz if DWM does not say.
+fn refresh_period() -> Duration {
+    let mut info = DWM_TIMING_INFO {
+        cbSize: size_of::<DWM_TIMING_INFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a properly sized local.
+    let ok = unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut info) }.is_ok();
+    let rate = info.rateRefresh;
+    if ok && rate.uiNumerator > 0 && rate.uiDenominator > 0 {
+        let hz = f64::from(rate.uiNumerator) / f64::from(rate.uiDenominator);
+        if (24.0..=360.0).contains(&hz) {
+            return Duration::from_secs_f64(1.0 / hz);
+        }
+    }
+    Duration::from_micros(16_667)
 }
 
 fn debug(text: String) {

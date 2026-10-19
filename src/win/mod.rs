@@ -7,6 +7,7 @@ mod theme;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use windows::Win32::Foundation::*;
@@ -21,7 +22,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::gesture::Side;
 use crate::notes;
 use editor::Editor;
-use swipe::SwipeState;
+use swipe::{Pacer, SwipeState, WM_SWIPE_FRAME};
 use theme::Theme;
 
 const CLASS: PCWSTR = w!("WhispWinWindow");
@@ -50,6 +51,8 @@ struct App {
     /// Index into `editors` of the current editor.
     active: Cell<usize>,
     swipe: RefCell<SwipeState>,
+    /// The frame pacer, while a swipe animation runs.
+    pacer: RefCell<Option<Arc<Pacer>>>,
     /// The note in the peek editor: its side and index.
     peek: Cell<Option<(Side, usize)>>,
     /// Start of the clock for gesture times.
@@ -204,6 +207,7 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             save_failed: Cell::new(false),
             busy: Cell::new(false),
             restyle_posted: Cell::new(false),
+            pacer: RefCell::new(None),
             theme: Cell::new(Theme::current()),
             dpi: Cell::new(dpi),
         }));
@@ -263,6 +267,7 @@ impl App {
                 self.changed();
             }
             WM_TIMER => self.timer(wparam.0),
+            WM_SWIPE_FRAME => self.swipe_frame_message(),
             WM_RESTYLE => {
                 self.restyle_posted.set(false);
                 self.busy.set(true);
@@ -304,6 +309,7 @@ impl App {
                 }
             }
             WM_DESTROY => {
+                self.stop_frames();
                 // SAFETY: plain call.
                 unsafe { PostQuitMessage(0) };
             }
