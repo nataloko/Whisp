@@ -8,26 +8,29 @@ needs nothing but Windows itself. Notes are plain `.md` files in
 ## What works
 
 - One window with a RichEdit editor, following the Windows light or dark app
-  theme (title bar included) and per monitor DPI.
-- Notes are ordered by modified time, oldest first, with an empty note after
-  the newest. It starts on the newest note. `Ctrl+]` goes to the next (newer)
-  note, `Ctrl+[` to the previous one, `Ctrl+N` to the empty note at the end.
-  The title shows the position, for example `Whisp  3/12`.
+  theme (or a fixed one), title bar included, and per monitor DPI.
+- A carousel of notes as in Whisp: pinned notes first (`Ctrl+Shift+P`), then
+  the rest oldest first, with an empty note after the newest. Old notes can
+  be archived and the carousel size capped; left out notes stay searchable.
+  `Ctrl+]` and `Ctrl+[` move between notes, as do touchpad swipes and the
+  mouse wheel at a note's edge. It starts on the note shown at the last close.
 - Saving is automatic, 500 ms after the last change and at once when leaving
   a note or closing. A trailing `*` in the title means a save failed; it is
   retried. Blank notes are deleted, as in Whisp.
-- Live Markdown highlighting: headings, bold, italic, strikethrough, inline
-  code and code blocks, lists, checkboxes, links, quotes and `//` comments.
-- Plain text only: paste drops formatting and RichEdit's formatting
-  shortcuts are blocked.
-- A second launch brings the running window to the front.
+- Live Markdown highlighting, and Whisp's hide symbols mode (`Ctrl+E`),
+  globally or per note.
+- Search across all notes (`Ctrl+F`) with tags and match highlights; OCR
+  paste of images; checklists; `::` commands and text expansions; paper
+  backgrounds (`Alt+P`); Whisp's editing keys and note actions.
 - `Ctrl+D` or `Shift+Delete` moves the current note into Whisp's `.trash`
   folder; `Ctrl+Shift+T` brings back the most recently deleted one.
-- The window's size and position are remembered.
+- Preferences (`Ctrl+,`) and a list of keyboard shortcuts (`Ctrl+/`).
+- A second launch brings the running window to the front.
 
-Settings (paper, window placement, recently deleted notes) are kept in
-`%LOCALAPPDATA%\whisp-win\settings.ini`. `WHISP_NOTES_DIR` and
-`WHISP_SETTINGS_DIR` override the notes and settings folders, for testing.
+Settings are kept in `%LOCALAPPDATA%\whisp-win\settings.ini`; pins and the
+per note hide symbols state are in Whisp's own `metadata.json` in the notes
+folder, so both apps agree. `WHISP_NOTES_DIR` (the default notes folder) and
+`WHISP_SETTINGS_DIR` override the folders, for testing.
 
 ## Icon
 
