@@ -467,6 +467,27 @@ impl Editor {
         runs
     }
 
+    /// Gives `start..end` the base format, outside the undo history, ahead
+    /// of a large replacement: RichEdit replaces text split into thousands
+    /// of formatted runs very slowly (20.7 s for 254 KB in the VM, 6.4 s
+    /// with this). Every line the range touches changes text, so the
+    /// restyle after the replacement, or after undoing it, formats it again.
+    pub(super) fn clear_format(&self, start: usize, end: usize, theme: &Theme) {
+        let Some(doc) = &self.doc else { return };
+        // SAFETY: TOM calls on the document of our own control.
+        unsafe {
+            let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
+            let _ = doc.Freeze();
+            let _ = doc.Undo(tomSuspend.0);
+            if let Some(font) = font(doc, start, end) {
+                reset(&font, &look(theme));
+            }
+            let _ = doc.Undo(tomResume.0);
+            let _ = doc.Unfreeze();
+            send(self.hwnd, EM_SETEVENTMASK, 0, mask);
+        }
+    }
+
     /// Resets all text to the base format and sets the default format.
     fn reset_format(&self, theme: &Theme) {
         let mut cf = format();
