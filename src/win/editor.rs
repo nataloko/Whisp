@@ -14,7 +14,6 @@ use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::{
     EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETRECT, SetWindowTheme,
 };
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
 
@@ -171,17 +170,17 @@ impl Editor {
 
     /// Loads a note: its text and highlighting in one RTF stream, with no
     /// undo history, no change notifications and the caret at the end.
-    pub fn load(&self, text: &str, theme: &Theme, dpi: u32) {
+    pub fn load(&self, text: &str, theme: &Theme) {
         let spans = markdown::highlight(text);
         let expected = to_cr(text);
-        let look = look(theme, dpi);
+        let look = look(theme);
         let document = rtf::document(text, &spans, &look);
         let lines = lines::lines(&expected, &spans);
         // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
             // Also sets the default format, used when typing into an empty note.
-            self.reset_format(theme, dpi);
+            self.reset_format(theme);
             self.stream_in(document.as_bytes(), SF_RTF);
             if !self.has_text(&expected) {
                 // FALLBACK: the RTF did not reproduce the text exactly. Load it
@@ -255,14 +254,14 @@ impl Editor {
     /// Restyles the lines whose text or styles changed since they were last
     /// styled, without moving the selection. Formatting stays out of the
     /// undo stack and sends no change notifications.
-    pub fn restyle_changes(&self, theme: &Theme, dpi: u32) {
+    pub fn restyle_changes(&self, theme: &Theme) {
         let started = Instant::now();
         let units = self.text_utf16();
         let spans = markdown::highlight(&String::from_utf16_lossy(&units));
         let lines = lines::lines(&units, &spans);
         let signatures: Vec<u64> = lines.iter().map(|l| l.signature).collect();
         let changed = lines::changed(&self.styled.borrow(), &signatures);
-        let runs = self.style_lines(&lines[changed.clone()], &look(theme, dpi));
+        let runs = self.style_lines(&lines[changed.clone()], &look(theme));
         *self.styled.borrow_mut() = signatures;
         let report = format!(
             "whisp: restyle {} lines, {runs} runs, {:.2} ms\n",
@@ -276,7 +275,7 @@ impl Editor {
     /// Restyles everything after a theme or DPI change by reloading the text
     /// as RTF, keeping the selection and scroll position. This clears the
     /// undo history.
-    pub fn restyle(&self, theme: &Theme, dpi: u32) {
+    pub fn restyle(&self, theme: &Theme) {
         let text = self.text();
         let mut sel = CHARRANGE::default();
         let mut scroll = POINT::default();
@@ -289,7 +288,7 @@ impl Editor {
                 0,
                 &mut scroll as *mut _ as isize,
             );
-            self.load(&text, theme, dpi);
+            self.load(&text, theme);
             send(self.hwnd, EM_EXSETSEL, 0, &sel as *const _ as isize);
             send(self.hwnd, EM_SETSCROLLPOS, 0, &scroll as *const _ as isize);
         }
@@ -332,7 +331,7 @@ impl Editor {
     }
 
     /// Resets all text to the base format and sets the default format.
-    fn reset_format(&self, theme: &Theme, dpi: u32) {
+    fn reset_format(&self, theme: &Theme) {
         let mut cf = format();
         cf.Base.dwMask = CFM_SIZE
             | CFM_COLOR
@@ -343,7 +342,7 @@ impl Editor {
             | CFM_BACKCOLOR;
         cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
         // Rounded to half points like the RTF and TOM sizes.
-        cf.Base.yHeight = look(theme, dpi).size as i32 * 10;
+        cf.Base.yHeight = look(theme).size as i32 * 10;
         cf.Base.crTextColor = theme.text;
         // SAFETY: `cf` outlives both calls.
         unsafe {
@@ -416,21 +415,14 @@ fn to_cr(text: &str) -> Vec<u16> {
         .collect()
 }
 
-/// A size in twips for `dpi`. RichEdit converts twips to pixels at the
-/// system DPI.
-fn twips(size: i32, dpi: u32) -> i32 {
-    // SAFETY: plain call.
-    let sys_dpi = unsafe { GetDpiForSystem() }.max(1) as i32;
-    size * dpi as i32 / sys_dpi
-}
-
 fn rgb(c: COLORREF) -> rtf::Rgb {
     (c.0 as u8, (c.0 >> 8) as u8, (c.0 >> 16) as u8)
 }
 
-/// The theme and sizes for RTF. Sizes are in half points, rounded.
-fn look(theme: &Theme, dpi: u32) -> rtf::Look {
-    let half_points = |size| ((twips(size, dpi) + 5) / 10).max(1) as u32;
+/// The theme and sizes for RTF. Sizes are in half points, rounded. They are
+/// not scaled for DPI: RichEdit scales text for the monitor itself.
+fn look(theme: &Theme) -> rtf::Look {
+    let half_points = |size: i32| ((size + 5) / 10).max(1) as u32;
     rtf::Look {
         text: rgb(theme.text),
         symbol: rgb(theme.symbol),

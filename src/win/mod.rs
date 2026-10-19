@@ -225,8 +225,7 @@ impl App {
             WM_RESTYLE => {
                 self.restyle_posted.set(false);
                 self.busy.set(true);
-                self.editor
-                    .restyle_changes(&self.theme.get(), self.dpi.get());
+                self.editor.restyle_changes(&self.theme.get());
                 self.busy.set(false);
             }
             WM_DPICHANGED => {
@@ -246,7 +245,6 @@ impl App {
                     );
                 }
                 self.layout();
-                self.restyle();
             }
             WM_SETTINGCHANGE if lparam.0 != 0 => {
                 // SAFETY: for WM_SETTINGCHANGE, a non-zero lparam is a NUL terminated string.
@@ -296,10 +294,10 @@ impl App {
         self.restyle();
     }
 
-    /// Restyles after a theme or DPI change.
+    /// Restyles after a theme change.
     fn restyle(&self) {
         self.busy.set(true);
-        self.editor.restyle(&self.theme.get(), self.dpi.get());
+        self.editor.restyle(&self.theme.get());
         self.busy.set(false);
     }
 
@@ -414,7 +412,7 @@ impl App {
             }
         };
         self.busy.set(true);
-        self.editor.load(&text, &self.theme.get(), self.dpi.get());
+        self.editor.load(&text, &self.theme.get());
         self.busy.set(false);
         self.current.set(index);
         self.dirty.set(false);
