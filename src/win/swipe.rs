@@ -378,6 +378,7 @@ impl App {
         self.active.set(1 - old);
         self.editor().set_read_only(false);
         self.peek.set(None);
+        self.generation.set(self.generation.get() + 1);
         self.current.set(index);
         self.dirty.set(false);
         self.update_title();

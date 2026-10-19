@@ -378,10 +378,15 @@ impl Editor {
 
     /// Pastes the clipboard as plain text, as one undoable step.
     pub fn paste_plain(&self) {
-        let Some(text) = clipboard_text(self.hwnd) else {
-            return;
-        };
-        let units: Vec<u16> = notes::to_lf(&text)
+        if let Some(text) = clipboard_text(self.hwnd) {
+            self.insert_plain(&text);
+        }
+    }
+
+    /// Inserts `text` in place of the selection, as one undoable step, as
+    /// typing would.
+    pub fn insert_plain(&self, text: &str) {
+        let units: Vec<u16> = notes::to_lf(text)
             .encode_utf16()
             .filter(|&u| u != 0)
             .map(|u| {

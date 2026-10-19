@@ -1,6 +1,7 @@
 //! The main window: note navigation, saving, theme, DPI and shortcuts.
 
 mod editor;
+mod ocr;
 mod swipe;
 mod theme;
 
@@ -22,6 +23,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::gesture::Side;
 use crate::notes;
 use editor::Editor;
+use ocr::WM_OCR_DONE;
 use swipe::{Pacer, SwipeState, WM_SWIPE_FRAME};
 use theme::Theme;
 
@@ -29,6 +31,9 @@ const CLASS: PCWSTR = w!("WhispWinWindow");
 const TIMER_SAVE: usize = 1;
 const SAVE_DELAY_MS: u32 = 500;
 const SAVE_RETRY_MS: u32 = 2000;
+/// Clears a passing status message from the title.
+const TIMER_STATUS: usize = 4;
+const STATUS_MS: u32 = 3000;
 /// Posted after a change, so restyling runs once RichEdit has finished
 /// handling the keystroke.
 const WM_RESTYLE: u32 = WM_APP + 1;
@@ -71,6 +76,13 @@ struct App {
     restyle_posted: Cell<bool>,
     theme: Cell<Theme>,
     dpi: Cell<u32>,
+    /// Changes whenever a different note is shown, so text read from an
+    /// image is only inserted into the note it was pasted into.
+    generation: Cell<u64>,
+    /// An image is being read.
+    ocr_running: Cell<bool>,
+    /// A passing message shown in the title, cleared by TIMER_STATUS.
+    status: RefCell<Option<&'static str>>,
 }
 
 thread_local! {
@@ -210,6 +222,9 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             pacer: RefCell::new(None),
             theme: Cell::new(Theme::current()),
             dpi: Cell::new(dpi),
+            generation: Cell::new(0),
+            ocr_running: Cell::new(false),
+            status: RefCell::new(None),
         }));
         APP.with(|a| a.set(app).ok());
 
@@ -268,6 +283,11 @@ impl App {
             }
             WM_TIMER => self.timer(wparam.0),
             WM_SWIPE_FRAME => self.swipe_frame_message(),
+            WM_OCR_DONE => {
+                // SAFETY: lparam is the result the OCR worker posted.
+                let done = unsafe { ocr::take(lparam) };
+                self.ocr_done(*done);
+            }
             WM_RESTYLE => {
                 self.restyle_posted.set(false);
                 self.busy.set(true);
@@ -390,6 +410,11 @@ impl App {
             // SAFETY: plain call.
             let _ = unsafe { KillTimer(Some(self.hwnd), id) };
             self.flush();
+        } else if id == TIMER_STATUS {
+            // SAFETY: plain call.
+            let _ = unsafe { KillTimer(Some(self.hwnd), id) };
+            self.status.replace(None);
+            self.update_title();
         } else {
             self.swipe_timer(id);
         }
@@ -481,6 +506,7 @@ impl App {
         self.busy.set(true);
         self.editor().load(&text, &self.theme.get());
         self.busy.set(false);
+        self.generation.set(self.generation.get() + 1);
         self.current.set(index);
         self.dirty.set(false);
         self.update_title();
@@ -490,7 +516,12 @@ impl App {
         let position = self.current.get() + 1;
         let total = self.notes.borrow().len() + 1;
         let mark = if self.save_failed.get() { " *" } else { "" };
-        let title = HSTRING::from(format!("Whisp  {position}/{total}{mark}"));
+        let status = match *self.status.borrow() {
+            Some(message) => format!(" \u{b7} {message}"),
+            None if self.ocr_running.get() => " \u{b7} Reading image\u{2026}".to_string(),
+            None => String::new(),
+        };
+        let title = HSTRING::from(format!("Whisp  {position}/{total}{mark}{status}"));
         // SAFETY: `title` outlives the call.
         let _ = unsafe { SetWindowTextW(self.hwnd, &title) };
     }
@@ -533,7 +564,7 @@ impl App {
         let shift = down(VK_SHIFT);
         if !down(VK_CONTROL) {
             if shift && key == VK_INSERT {
-                self.editor().paste_plain();
+                self.paste();
                 return true;
             }
             return false;
@@ -543,7 +574,7 @@ impl App {
             VK_OEM_6 => self.go(Nav::Newer),
             VK_OEM_4 => self.go(Nav::Older),
             VK_N => self.go(Nav::Last),
-            VK_V => self.editor().paste_plain(),
+            VK_V => self.paste(),
             VK_A if !shift => return false,
             VK_C | VK_X | VK_Z | VK_Y => return false,
             // Any other Ctrl + letter, digit or punctuation key is a RichEdit
@@ -551,6 +582,63 @@ impl App {
             _ => return is_character_key(key),
         }
         true
+    }
+}
+
+impl App {
+    /// Ctrl+V, Shift+Insert and Ctrl+Shift+V: text as plain text, else the
+    /// text read from an image.
+    fn paste(&self) {
+        // Text comes first. Office and other apps put both text and a
+        // picture of it on the clipboard, and the text is what the user
+        // means. Whisp checks for an image first; this differs on purpose.
+        if ocr::clipboard_has_text() {
+            self.editor().paste_plain();
+            return;
+        }
+        if !ocr::clipboard_has_image() {
+            return;
+        }
+        if self.ocr_running.get() {
+            self.show_status("Still reading the previous image");
+            return;
+        }
+        let Some(dib) = ocr::clipboard_dib(self.hwnd) else {
+            return;
+        };
+        self.ocr_running.set(true);
+        self.update_title();
+        ocr::start(self.hwnd, dib, self.generation.get());
+    }
+
+    /// The text read from an image: inserted in place of the selection if
+    /// the note it was pasted into is still the current one.
+    fn ocr_done(&self, done: ocr::Done) {
+        self.ocr_running.set(false);
+        let message = match done.outcome {
+            _ if done.generation != self.generation.get() => {
+                Some("Image text discarded: the note changed")
+            }
+            ocr::Outcome::Text(text) => {
+                self.editor().insert_plain(&text);
+                None
+            }
+            ocr::Outcome::NoText => Some("No text found in image"),
+            ocr::Outcome::NoEngine => Some("No OCR language installed"),
+            ocr::Outcome::Failed => Some("Could not read the image"),
+        };
+        match message {
+            Some(message) => self.show_status(message),
+            None => self.update_title(),
+        }
+    }
+
+    /// Shows `message` in the title for a few seconds.
+    fn show_status(&self, message: &'static str) {
+        self.status.replace(Some(message));
+        self.update_title();
+        // SAFETY: a timer on our own window; restarting it resets its delay.
+        unsafe { SetTimer(Some(self.hwnd), TIMER_STATUS, STATUS_MS, None) };
     }
 }
 

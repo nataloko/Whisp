@@ -4,10 +4,12 @@
 // them everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod dib;
 mod gesture;
 mod lines;
 mod markdown;
 mod notes;
+mod ocr_text;
 mod rtf;
 #[cfg(windows)]
 mod win;
