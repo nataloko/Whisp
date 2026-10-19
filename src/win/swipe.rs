@@ -206,9 +206,16 @@ impl App {
             SwipeState::Tracking(swipe) => {
                 let offset = swipe.offset();
                 let speed = swipe.speed();
-                // Committing follows the navigation rules: nothing moves
-                // unless the current note is saved.
-                let target = swipe.decide().filter(|_| self.flush());
+                // Without animation the gesture was cut short by a key or
+                // click, so only the distance travelled counts. Committing
+                // follows the navigation rules: nothing moves unless the
+                // current note is saved.
+                let target = if animate {
+                    swipe.decide()
+                } else {
+                    swipe.decide_by_distance()
+                }
+                .filter(|_| self.flush());
                 if !animate {
                     self.settled(target, offset, speed, 0, 0);
                     return;

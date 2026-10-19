@@ -182,6 +182,13 @@ impl Swipe {
         let distance = self.offset().abs() / self.width;
         (toward >= threshold || distance >= COMMIT_FRACTION).then_some(side)
     }
+
+    /// Like `decide`, by distance alone: for a gesture cut short by a key or
+    /// click, where the speed at that moment says nothing about the target.
+    pub fn decide_by_distance(&self) -> Option<Side> {
+        let side = self.side().filter(|&s| self.can(s))?;
+        (self.offset().abs() / self.width >= COMMIT_FRACTION).then_some(side)
+    }
 }
 
 /// The animation from the offset at the end of a gesture to its target.
@@ -294,6 +301,24 @@ mod tests {
         }
         assert!(s.offset() > COMMIT_FRACTION * W);
         assert_eq!(s.decide(), None);
+    }
+
+    #[test]
+    fn decide_by_distance_ignores_speed() {
+        // A fast start that is still short: speed alone would commit.
+        let mut s = Swipe::new(W, true, true, 0);
+        for i in 1..=4 {
+            s.scroll(10, 1000 + i * 10);
+        }
+        assert_eq!(s.decide(), Some(Side::Newer));
+        assert_eq!(s.decide_by_distance(), None);
+        // Past a quarter width it still commits.
+        s.scroll(100, 1100);
+        assert_eq!(s.decide_by_distance(), Some(Side::Newer));
+        // Nothing to commit to at the end of the list.
+        let mut s = Swipe::new(W, true, false, 0);
+        s.scroll(200, 0);
+        assert_eq!(s.decide_by_distance(), None);
     }
 
     #[test]
