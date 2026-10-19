@@ -62,6 +62,21 @@ cargo test     # platform independent parts, on the build machine
 
 The program is `target/x86_64-pc-windows-gnu/release/whisp.exe`.
 
+### Installer
+
+`installer/whisp.iss` builds `target/installer/Whisp-<version>-setup.exe`
+with [Inno Setup](https://jrsoftware.org/isinfo.php) 7 on Windows, from the
+built program (its version comes from the exe):
+
+```bat
+ISCC installer\whisp.iss
+```
+
+The installer needs no admin rights (it offers an all users install too),
+adds a Start menu entry and optionally a desktop icon, and closes a running
+Whisp first so it saves. Uninstalling keeps the notes and settings. It
+refuses to install over the old GTK build of Whisp.
+
 ## Licence
 
 GPL-3.0-or-later, like Whisp, which this program ports to Windows (its
