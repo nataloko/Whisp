@@ -403,6 +403,9 @@ impl App {
     /// Keyboard input aimed at the editor that is not current goes to the
     /// current one instead.
     pub(super) fn intercept(&self, msg: &mut MSG) -> bool {
+        if self.search_open.get() {
+            return self.search_intercept(msg);
+        }
         match msg.message {
             WM_MOUSEHWHEEL => {
                 let delta = (msg.wParam.0 >> 16) as u16 as i16;

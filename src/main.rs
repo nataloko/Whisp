@@ -11,6 +11,7 @@ mod markdown;
 mod notes;
 mod ocr_text;
 mod rtf;
+mod search;
 #[cfg(windows)]
 mod win;
 

@@ -2,6 +2,7 @@
 
 mod editor;
 mod ocr;
+mod search_ui;
 mod swipe;
 mod theme;
 
@@ -22,8 +23,10 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::gesture::Side;
 use crate::notes;
+use crate::search::{Index, Row};
 use editor::Editor;
 use ocr::WM_OCR_DONE;
+use search_ui::{Panel, TIMER_SEARCH, WM_SEARCH_OPEN};
 use swipe::{Pacer, SwipeState, WM_SWIPE_FRAME};
 use theme::Theme;
 
@@ -83,6 +86,13 @@ struct App {
     ocr_running: Cell<bool>,
     /// A passing message shown in the title, cleared by TIMER_STATUS.
     status: RefCell<Option<&'static str>>,
+    /// The search panel (Ctrl+F), created on first use.
+    search: OnceCell<Panel>,
+    search_open: Cell<bool>,
+    /// The rows the search list shows.
+    search_rows: RefCell<Vec<Row>>,
+    /// All notes for searching, cached by modified time.
+    index: RefCell<Index>,
 }
 
 thread_local! {
@@ -225,6 +235,10 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             generation: Cell::new(0),
             ocr_running: Cell::new(false),
             status: RefCell::new(None),
+            search: OnceCell::new(),
+            search_open: Cell::new(false),
+            search_rows: RefCell::new(Vec::new()),
+            index: RefCell::new(Index::default()),
         }));
         APP.with(|a| a.set(app).ok());
 
@@ -260,8 +274,12 @@ impl App {
                 return None;
             }
             WM_SETFOCUS => {
-                // SAFETY: the editor is a live child window.
-                let _ = unsafe { SetFocus(Some(self.editor().hwnd)) };
+                let target = match self.search_panel() {
+                    Some(panel) if self.search_open.get() => panel.edit,
+                    _ => self.editor().hwnd,
+                };
+                // SAFETY: a live child window.
+                let _ = unsafe { SetFocus(Some(target)) };
             }
             // Only what the editors leave uncovered, as at the ends of a swipe.
             WM_ERASEBKGND => {
@@ -273,6 +291,7 @@ impl App {
                     FillRect(HDC(wparam.0 as *mut _), &rc, brush);
                     let _ = DeleteObject(brush.into());
                 }
+                self.paint_search_box(HDC(wparam.0 as *mut _));
                 return Some(LRESULT(1));
             }
             WM_COMMAND
@@ -281,6 +300,38 @@ impl App {
             {
                 self.changed();
             }
+            WM_COMMAND
+                if self
+                    .search_panel()
+                    .is_some_and(|p| lparam.0 == p.edit.0 as isize) =>
+            {
+                if (wparam.0 >> 16) as u32 == EN_CHANGE {
+                    self.search_changed();
+                }
+            }
+            WM_COMMAND
+                if self
+                    .search_panel()
+                    .is_some_and(|p| lparam.0 == p.list.0 as isize) =>
+            {
+                if (wparam.0 >> 16) as u32 == LBN_SELCHANGE {
+                    self.search_clicked();
+                }
+            }
+            WM_DRAWITEM => {
+                // SAFETY: for WM_DRAWITEM, lparam points to a DRAWITEMSTRUCT.
+                let item =
+                    unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::DRAWITEMSTRUCT) };
+                if !self.search_panel().is_some_and(|p| p.list == item.hwndItem) {
+                    return None;
+                }
+                self.draw_search_row(item);
+                return Some(LRESULT(1));
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                return self.search_color(HDC(wparam.0 as *mut _), HWND(lparam.0 as *mut _));
+            }
+            WM_SEARCH_OPEN if self.search_open.get() => self.open_row(wparam.0),
             WM_TIMER => self.timer(wparam.0),
             WM_SWIPE_FRAME => self.swipe_frame_message(),
             WM_OCR_DONE => {
@@ -311,6 +362,7 @@ impl App {
                     );
                 }
                 self.layout();
+                self.style_search();
             }
             WM_SETTINGCHANGE if lparam.0 != 0 => {
                 // SAFETY: for WM_SETTINGCHANGE, a non-zero lparam is a NUL terminated string.
@@ -361,6 +413,7 @@ impl App {
                 editor.set_padding(self.dpi.get());
             }
         }
+        self.layout_search();
     }
 
     fn retheme(&self) {
@@ -377,6 +430,7 @@ impl App {
             let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, flags);
         }
         self.restyle();
+        self.style_search();
     }
 
     /// Restyles after a theme change.
@@ -410,6 +464,8 @@ impl App {
             // SAFETY: plain call.
             let _ = unsafe { KillTimer(Some(self.hwnd), id) };
             self.flush();
+        } else if id == TIMER_SEARCH {
+            self.run_search();
         } else if id == TIMER_STATUS {
             // SAFETY: plain call.
             let _ = unsafe { KillTimer(Some(self.hwnd), id) };
@@ -519,6 +575,7 @@ impl App {
         let status = match *self.status.borrow() {
             Some(message) => format!(" \u{b7} {message}"),
             None if self.ocr_running.get() => " \u{b7} Reading image\u{2026}".to_string(),
+            None if self.search_open.get() => " \u{b7} Search".to_string(),
             None => String::new(),
         };
         let title = HSTRING::from(format!("Whisp  {position}/{total}{mark}{status}"));
@@ -574,6 +631,7 @@ impl App {
             VK_OEM_6 => self.go(Nav::Newer),
             VK_OEM_4 => self.go(Nav::Older),
             VK_N => self.go(Nav::Last),
+            VK_F => self.open_search(),
             VK_V => self.paste(),
             VK_A if !shift => return false,
             VK_C | VK_X | VK_Z | VK_Y => return false,

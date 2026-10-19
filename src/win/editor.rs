@@ -376,6 +376,20 @@ impl Editor {
         }
     }
 
+    /// Selects UTF-16 offsets `start..end` and scrolls them into view.
+    pub fn select(&self, start: usize, end: usize) {
+        let len = self.len();
+        let range = CHARRANGE {
+            cpMin: start.min(len) as i32,
+            cpMax: end.min(len) as i32,
+        };
+        // SAFETY: `range` outlives the call.
+        unsafe {
+            send(self.hwnd, EM_EXSETSEL, 0, &range as *const _ as isize);
+            send(self.hwnd, EM_SCROLLCARET, 0, 0);
+        }
+    }
+
     /// Pastes the clipboard as plain text, as one undoable step.
     pub fn paste_plain(&self) {
         if let Some(text) = clipboard_text(self.hwnd) {
