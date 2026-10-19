@@ -58,3 +58,8 @@ cargo test     # platform independent parts, on the build machine
 ```
 
 The program is `target/x86_64-pc-windows-gnu/release/whisp.exe`.
+
+## Licence
+
+GPL-3.0-or-later, like Whisp, which this program ports to Windows (its
+Markdown rules, list and expansion behaviour, texts and icon). See `LICENSE`.

@@ -3,6 +3,7 @@ name = "whisp-win"
 version = "0.1.0"
 edition = "2024"
 description = "A native Windows scratchpad based on Whisp"
+license = "GPL-3.0-or-later"
 publish = false
 
 [[bin]]
