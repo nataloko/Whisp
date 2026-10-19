@@ -295,8 +295,7 @@ impl App {
     /// Esc or the close button: closes the shortcuts window.
     pub(super) fn close_keys(&self) {
         if let Some(hwnd) = self.keys_hwnd() {
-            // SAFETY: our own window; WM_DESTROY drops the state.
-            let _ = unsafe { DestroyWindow(hwnd) };
+            dialog::close(hwnd);
         }
     }
 

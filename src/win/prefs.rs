@@ -785,8 +785,7 @@ impl App {
     pub(super) fn close_prefs(&self) {
         let open = self.prefs.borrow().as_ref().map(|p| p.hwnd);
         if let Some(hwnd) = open {
-            // SAFETY: our own window; WM_DESTROY drops the state.
-            let _ = unsafe { DestroyWindow(hwnd) };
+            dialog::close(hwnd);
         }
     }
 

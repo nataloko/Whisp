@@ -179,6 +179,21 @@ pub(super) fn bring_forward(hwnd: HWND) {
     }
 }
 
+/// Closes one of the two windows. If it is the active window, its owner
+/// (the main window) is activated first: after a modal dialog such as the
+/// font picker, Windows would otherwise activate whatever window is behind.
+pub(super) fn close(hwnd: HWND) {
+    // SAFETY: plain calls on our own windows; WM_DESTROY drops the state.
+    unsafe {
+        if GetForegroundWindow() == hwnd
+            && let Ok(owner) = GetWindow(hwnd, GW_OWNER)
+        {
+            let _ = SetForegroundWindow(owner);
+        }
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
 /// The dark or light title bar of a window shown in a new theme.
 pub(super) fn refresh_frame(hwnd: HWND) {
     // SAFETY: plain call; makes the title bar repaint in the new colours.
