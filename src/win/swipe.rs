@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 
@@ -412,12 +412,23 @@ impl App {
             return true;
         }
         match msg.message {
+            // `#` after an empty box in a list note replaces the box.
+            WM_CHAR if msg.wParam.0 == usize::from(b'#') && msg.hwnd == self.editor().hwnd => {
+                self.hash_key()
+            }
+            // A wheel notch starting at the top or bottom changes note.
+            WM_MOUSEWHEEL if self.wheel_edge(msg) => true,
+            WM_LBUTTONDOWN if self.ctrl_click(msg) => true,
             WM_MOUSEHWHEEL => {
                 let delta = (msg.wParam.0 >> 16) as u16 as i16;
                 self.swipe_wheel(i32::from(delta));
                 true
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
+                if msg.wParam.0 == usize::from(VK_CONTROL.0) {
+                    // A hand over a link while Ctrl is held.
+                    self.refresh_cursor();
+                }
                 self.finish_swipe();
                 // Finishing may have swapped the editors, while the key, and
                 // the characters TranslateMessage makes from it, still name
@@ -427,6 +438,9 @@ impl App {
             }
             WM_KEYUP | WM_SYSKEYUP | WM_CHAR | WM_SYSCHAR | WM_DEADCHAR | WM_SYSDEADCHAR
             | WM_UNICHAR | WM_IME_CHAR => {
+                if msg.message == WM_KEYUP && msg.wParam.0 == usize::from(VK_CONTROL.0) {
+                    self.refresh_cursor();
+                }
                 self.retarget(msg);
                 false
             }

@@ -10,6 +10,7 @@ mod gesture;
 mod lines;
 mod lists;
 mod markdown;
+mod markup;
 mod notes;
 mod ocr_text;
 mod paper;

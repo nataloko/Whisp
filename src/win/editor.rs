@@ -13,7 +13,8 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::{
-    EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETREADONLY, EM_SETRECT, SetWindowTheme,
+    EM_CHARFROMPOS, EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETREADONLY, EM_SETRECT,
+    SetWindowTheme,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{GUID, HSTRING, IUnknown, Interface, PCWSTR, s, w};
@@ -380,6 +381,59 @@ impl Editor {
         self.replace_plain(text);
     }
 
+    /// The note's first line, enough of it to tell a list note.
+    pub(super) fn first_line(&self) -> String {
+        let start = self.text_range(0, 256);
+        let end = start
+            .iter()
+            .position(|&u| matches!(u, 0x0a | 0x0b | 0x0d))
+            .unwrap_or(start.len());
+        String::from_utf16_lossy(&start[..end])
+    }
+
+    /// The paragraph around `offset` and the offset's column in it, read
+    /// from a window of the text around it.
+    pub(super) fn line_around(&self, offset: usize) -> (String, usize) {
+        const REACH: usize = 4096;
+        let from = offset.saturating_sub(REACH);
+        let units = self.text_range(from, offset + REACH);
+        let at = (offset - from).min(units.len());
+        let is_break = |u: &u16| matches!(u, 0x0a | 0x0b | 0x0d);
+        let start = units[..at].iter().rposition(is_break).map_or(0, |i| i + 1);
+        let end = units[at..]
+            .iter()
+            .position(is_break)
+            .map_or(units.len(), |i| at + i);
+        (String::from_utf16_lossy(&units[start..end]), at - start)
+    }
+
+    /// The character nearest to the client point `(x, y)`.
+    pub(super) fn char_from_point(&self, x: i32, y: i32) -> usize {
+        let point = windows::Win32::Foundation::POINTL { x, y };
+        // SAFETY: `point` outlives the call.
+        let n = unsafe { send(self.hwnd, EM_CHARFROMPOS, 0, &point as *const _ as isize) };
+        n.max(0) as usize
+    }
+
+    /// Whether the note is scrolled to its top, and to its bottom. A note
+    /// that fits is at both.
+    pub(super) fn scroll_edges(&self) -> (bool, bool) {
+        let mut info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_ALL,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a properly sized local.
+        if unsafe { GetScrollInfo(self.hwnd, SB_VERT, &mut info) }.is_err() {
+            return (true, true);
+        }
+        let page = info.nPage as i32;
+        // A pixel of slack, as Whisp allows.
+        let top = info.nPos <= info.nMin + 1;
+        let bottom = page == 0 || info.nPos + page >= info.nMax;
+        (top, bottom)
+    }
+
     /// The text from `from` to `to` (UTF-16 offsets, clamped).
     pub(super) fn text_range(&self, from: usize, to: usize) -> Vec<u16> {
         let to = to.min(self.len());
@@ -416,6 +470,10 @@ impl Editor {
     /// Replaces the edit's range with one EM_REPLACESEL, then places the
     /// caret.
     fn apply_edit(&self, lines: &[&str], edit: &lists::Edit) {
+        if edit.start == edit.end && edit.text.is_empty() {
+            // Nothing to change: the action only swallows its key.
+            return;
+        }
         let range = CHARRANGE {
             cpMin: lists::offset16(lines, edit.start) as i32,
             cpMax: lists::offset16(lines, edit.end) as i32,
@@ -533,6 +591,11 @@ impl Editor {
             send(self.hwnd, EM_EXSETSEL, 0, &range as *const _ as isize);
             send(self.hwnd, EM_SCROLLCARET, 0, 0);
         }
+    }
+
+    /// The clipboard's text, if it has any.
+    pub(super) fn clipboard_text(&self) -> Option<String> {
+        clipboard_text(self.hwnd)
     }
 
     /// Pastes the clipboard as plain text, as one undoable step.

@@ -450,6 +450,84 @@ fn convert_line(line: &str) -> Option<(usize, String)> {
     Some((len, format!("{}{mark}{space}", take(line, indent))))
 }
 
+/// Text before the caret that is only a box: `^\s*[☐☑]\s*$`.
+fn only_box(s: &str) -> bool {
+    let rest = s.trim_start();
+    rest.starts_with([EMPTY_BOX_CHAR, CHECKED_BOX_CHAR]) && rest[3..].trim().is_empty()
+}
+
+const EMPTY_BOX_CHAR: char = '\u{2610}';
+const CHECKED_BOX_CHAR: char = '\u{2611}';
+
+/// Backspace in a list note, as Whisp: on a line that is only a box, with
+/// the caret after it, the whole line goes and the caret ends on the line
+/// above. `None` leaves Backspace to the editor.
+pub fn backspace_box(lines: &[&str], caret: (usize, usize)) -> Option<Edit> {
+    let (line, column) = caret;
+    let text = lines.get(line)?;
+    if !is_list_note(lines[0]) || !only_box(take(text, column)) || !only_box(text) {
+        return None;
+    }
+    Some(match line.checked_sub(1) {
+        Some(above) => Edit {
+            start: (above, chars(lines[above])),
+            end: (line, chars(text)),
+            text: String::new(),
+            caret: (above, chars(lines[above])),
+        },
+        None => Edit {
+            start: (0, 0),
+            end: (0, chars(text)),
+            text: String::new(),
+            caret: (0, 0),
+        },
+    })
+}
+
+/// Ctrl+Backspace, as Whisp: nothing at the start of a line; on a line that
+/// is only a bullet or a box before the caret, that prefix goes. `None`
+/// leaves the editor's word delete. An empty edit means "do nothing".
+pub fn ctrl_backspace(lines: &[&str], caret: (usize, usize)) -> Option<Edit> {
+    let (line, column) = caret;
+    let text = lines.get(line)?;
+    if column == 0 {
+        return Some(Edit {
+            start: caret,
+            end: caret,
+            text: String::new(),
+            caret,
+        });
+    }
+    let before = take(text, column);
+    let rest = before.trim_start();
+    let marker = rest.starts_with(['-', '*', '+', EMPTY_BOX_CHAR, CHECKED_BOX_CHAR]);
+    let after_marker: String = rest.chars().skip(1).collect();
+    if !marker || !after_marker.trim().is_empty() {
+        return None;
+    }
+    Some(Edit {
+        start: (line, 0),
+        end: caret,
+        text: String::new(),
+        caret: (line, 0),
+    })
+}
+
+/// `#` typed after an empty box in a list note replaces the box, as Whisp.
+pub fn hash_after_box(lines: &[&str], caret: (usize, usize)) -> Option<Edit> {
+    let (line, column) = caret;
+    let text = lines.get(line)?;
+    if !is_list_note(lines[0]) || !only_box(take(text, column)) {
+        return None;
+    }
+    Some(Edit {
+        start: (line, 0),
+        end: caret,
+        text: "#".into(),
+        caret: (line, 1),
+    })
+}
+
 /// The UTF-16 offset of `(line, column)`, with one unit per line break.
 pub fn offset16(lines: &[&str], (line, column): (usize, usize)) -> usize {
     let before: usize = lines[..line.min(lines.len())]
@@ -755,6 +833,59 @@ mod tests {
         // ...so the space typed next is the only one.
         let edit = convert_checkboxes(&["- [ ] task"], 0..1, (0, 10)).unwrap();
         assert_eq!(apply("- [ ] task", &edit).0, "\u{2610} task");
+    }
+
+    #[test]
+    fn list_note_backspace_ctrl_backspace_and_hash() {
+        let t = "List\nmilk\n  \u{2610} ";
+        assert_eq!(
+            run(t, (2, 4), backspace_box),
+            Some(("List\nmilk".into(), (1, 4)))
+        );
+        assert_eq!(
+            run(t, (2, 3), backspace_box),
+            Some(("List\nmilk".into(), (1, 4)))
+        );
+        assert_eq!(
+            run("List\n\u{2610} x", (1, 2), backspace_box),
+            None,
+            "the line has text"
+        );
+        assert_eq!(
+            run("notes\n\u{2610} ", (1, 2), backspace_box),
+            None,
+            "not a list note"
+        );
+        assert_eq!(
+            run("\u{2610} ", (0, 2), backspace_box),
+            None,
+            "a box is not the word list"
+        );
+
+        assert_eq!(
+            run("a\nb", (1, 0), ctrl_backspace),
+            Some(("a\nb".into(), (1, 0))),
+            "does nothing"
+        );
+        assert_eq!(
+            run("a\n  - ", (1, 4), ctrl_backspace),
+            Some(("a\n".into(), (1, 0)))
+        );
+        assert_eq!(
+            run("a\n\u{2611}", (1, 1), ctrl_backspace),
+            Some(("a\n".into(), (1, 0)))
+        );
+        assert_eq!(
+            run("a\n- word", (1, 6), ctrl_backspace),
+            None,
+            "the editor's word delete"
+        );
+
+        assert_eq!(
+            run("list\n  \u{2610} ", (1, 4), hash_after_box),
+            Some(("list\n#".into(), (1, 1)))
+        );
+        assert_eq!(run("todo\n\u{2610} ", (1, 2), hash_after_box), None);
     }
 
     #[test]

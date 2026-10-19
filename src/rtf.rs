@@ -91,6 +91,11 @@ impl Attr {
                     self.heading = level;
                 }
             }
+            Style::ListTitle => {
+                self.bold = true;
+                self.color = LIST;
+            }
+            Style::Underline => self.underline = true,
             Style::Bold => self.bold = true,
             Style::Italic => self.italic = true,
             Style::Strike => self.strike = true,

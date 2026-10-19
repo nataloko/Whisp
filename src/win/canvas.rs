@@ -124,6 +124,8 @@ thread_local! {
     static EDITORS: RefCell<HashMap<isize, Editor>> = RefCell::new(HashMap::new());
     static PAINTING: Cell<bool> = const { Cell::new(false) };
     static LAST_LOG: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Asked on WM_SETCURSOR; true when it set the pointer itself.
+    static CURSOR_HOOK: Cell<Option<CursorHook>> = const { Cell::new(None) };
 }
 
 fn rgb(c: COLORREF) -> u32 {
@@ -132,6 +134,14 @@ fn rgb(c: COLORREF) -> u32 {
 
 /// Starts painting paper for a RichEdit window. Without `services`, it
 /// keeps painting itself, on blank paper.
+/// Sets the pointer for an editor; true when it did.
+type CursorHook = fn(HWND) -> bool;
+
+/// Lets the app choose the editors' pointer (a hand over links with Ctrl).
+pub fn set_cursor_hook(hook: CursorHook) {
+    CURSOR_HOOK.with(|h| h.set(Some(hook)));
+}
+
 pub fn attach(hwnd: HWND, services: Option<ITextServices>) {
     // SAFETY: replaces the window procedure of our own window; the old one
     // is kept and called for everything not handled here.
@@ -191,6 +201,12 @@ unsafe extern "system" fn subclass(
     let original = original_of(hwnd);
     if msg == WM_NCDESTROY {
         EDITORS.with(|e| e.borrow_mut().remove(&(hwnd.0 as isize)));
+    }
+    if msg == WM_SETCURSOR
+        && (lparam.0 & 0xffff) as u32 == HTCLIENT
+        && CURSOR_HOOK.with(Cell::get).is_some_and(|hook| hook(hwnd))
+    {
+        return LRESULT(1);
     }
     let paper = LOOK.with(|l| l.get().paper);
     if paper == Paper::Blank || original.is_none() {

@@ -7,6 +7,11 @@
 pub enum Style {
     /// Heading line, level 1 to 6.
     Heading(u8),
+    /// The first line of a list note (its title is the word "list"), in
+    /// Whisp's purple.
+    ListTitle,
+    /// `_text_`, `__text__` and `<u>text</u>`, as in Whisp.
+    Underline,
     Quote,
     Comment,
     Bold,
@@ -40,7 +45,7 @@ pub fn highlight(text: &str) -> Vec<Span> {
         chars.clear();
         chars.extend(line.chars());
         let mut spans = Spans::new(&chars, offset, &mut out);
-        in_fence = block(&chars, in_fence, &mut spans);
+        in_fence = block(&chars, in_fence, offset == 0, &mut spans);
         offset = spans.pos[chars.len()] + 1;
     }
     out.sort_by_key(|s| rank(s.style));
@@ -52,20 +57,21 @@ pub fn highlight(text: &str) -> Vec<Span> {
 /// returns whether a fence is open after it: the only state that carries
 /// from one line to the next. Concatenating these per line and sorting by
 /// style gives `highlight`'s result.
-pub fn highlight_line(line: &str, in_fence: bool) -> (Vec<Span>, bool) {
+/// `first` says whether this is the note's first line.
+pub fn highlight_line(line: &str, in_fence: bool, first: bool) -> (Vec<Span>, bool) {
     let mut out = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let mut spans = Spans::new(&chars, 0, &mut out);
-    let after = block(&chars, in_fence, &mut spans);
+    let after = block(&chars, in_fence, first, &mut spans);
     out.sort_by_key(|s| rank(s.style));
     (out, after)
 }
 
 fn rank(style: Style) -> u8 {
     match style {
-        Style::Heading(_) => 0,
+        Style::Heading(_) | Style::ListTitle => 0,
         Style::Quote | Style::Comment => 1,
-        Style::Bold | Style::Italic | Style::Strike => 2,
+        Style::Bold | Style::Italic | Style::Strike | Style::Underline => 2,
         Style::Link => 3,
         Style::Code => 4,
         Style::ListMarker | Style::Checkbox => 5,
@@ -108,7 +114,7 @@ fn is_blank(c: char) -> bool {
 }
 
 /// Block rules for one line; returns whether a code fence is open after it.
-fn block(c: &[char], in_fence: bool, sp: &mut Spans) -> bool {
+fn block(c: &[char], in_fence: bool, first: bool, sp: &mut Spans) -> bool {
     let len = c.len();
     let indent = c.iter().take_while(|&&ch| is_blank(ch)).count();
     let rest = &c[indent..];
@@ -130,7 +136,11 @@ fn block(c: &[char], in_fence: bool, sp: &mut Spans) -> bool {
 
     let hashes = c.iter().take_while(|&&ch| ch == '#').count();
     let mut start = indent;
-    if (1..=6).contains(&hashes) && c.get(hashes).is_some_and(|&ch| is_blank(ch)) {
+    let list_title = first && crate::lists::is_list_note(&c.iter().collect::<String>());
+    if list_title {
+        // Whisp styles a list note's title line instead of as a heading.
+        sp.add(0, len, Style::ListTitle);
+    } else if (1..=6).contains(&hashes) && c.get(hashes).is_some_and(|&ch| is_blank(ch)) {
         sp.add(0, len, Style::Heading(hashes as u8));
         sp.add(0, hashes, Style::Symbol);
         start = hashes;
@@ -289,7 +299,72 @@ fn inline(c: &[char], from: usize, sp: &mut Spans) {
         i += 1;
     }
 
+    underline(c, from, &masked, sp);
     emphasis(c, from, &masked, sp);
+}
+
+/// Python's `\w`: a letter, digit or underscore.
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Underline, as Whisp: `<u>text</u>`, and `(?<!\w)(_+)([^\n]+?)(\1)(?!\w)`,
+/// so `_text_` and `__text__` alike, but not inside words.
+fn underline(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
+    let n = c.len();
+    let is = |at: usize, s: &str| {
+        let s: Vec<char> = s.chars().collect();
+        c.len() >= at + s.len()
+            && c[at..at + s.len()] == s[..]
+            && !masked[at..at + s.len()].contains(&true)
+    };
+    let mut i = from;
+    while i < n {
+        if is(i, "<u>")
+            && let Some(close) = (i + 3..n).find(|&j| is(j, "</u>"))
+        {
+            sp.add(i, close + 4, Style::Underline);
+            sp.add(i, i + 3, Style::Symbol);
+            sp.add(close, close + 4, Style::Symbol);
+            i = close + 4;
+            continue;
+        }
+        i += 1;
+    }
+
+    let mut i = from;
+    while i < n {
+        if c[i] != '_' || masked[i] || (i > 0 && is_word(c[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let run = run_len(c, i, '_');
+        // The regex's backtracking: the longest opening run first, then the
+        // shortest text that a closing run of the same length ends.
+        let mut found = None;
+        'runs: for k in (1..=run).rev() {
+            for end in i + k + 1..=n.saturating_sub(k) {
+                let closing = &c[end..end + k];
+                let after_ok = end + k == n || !is_word(c[end + k]);
+                if closing.iter().all(|&x| x == '_')
+                    && !masked[end..end + k].contains(&true)
+                    && after_ok
+                {
+                    found = Some((k, end));
+                    break 'runs;
+                }
+            }
+        }
+        match found {
+            Some((k, end)) => {
+                sp.add(i, end + k, Style::Underline);
+                sp.add(i, i + k, Style::Symbol);
+                sp.add(end, end + k, Style::Symbol);
+                i = end + k;
+            }
+            None => i += 1,
+        }
+    }
 }
 
 fn run_len(c: &[char], i: usize, ch: char) -> usize {
@@ -353,14 +428,14 @@ struct Run {
     can_close: bool,
 }
 
-/// `**bold**`, `*italic*`, `_italic_`, `***both***` and `~~strike~~`, using
+/// `**bold**`, `*italic*`, `***both***` and `~~strike~~`, using
 /// a simplified version of CommonMark's delimiter run rules.
 fn emphasis(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
     let mut runs = Vec::new();
     let mut i = from;
     while i < c.len() {
         let ch = c[i];
-        if masked[i] || !matches!(ch, '*' | '_' | '~') {
+        if masked[i] || !matches!(ch, '*' | '~') {
             i += 1;
             continue;
         }
@@ -370,12 +445,8 @@ fn emphasis(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
         }
         let prev = i.checked_sub(1).map(|p| c[p]);
         let next = c.get(j).copied();
-        let mut can_open = next.is_some_and(|x| !x.is_whitespace());
-        let mut can_close = prev.is_some_and(|x| !x.is_whitespace());
-        if ch == '_' {
-            can_open &= !prev.is_some_and(char::is_alphanumeric);
-            can_close &= !next.is_some_and(char::is_alphanumeric);
-        }
+        let can_open = next.is_some_and(|x| !x.is_whitespace());
+        let can_close = prev.is_some_and(|x| !x.is_whitespace());
         if ch != '~' || j - i == 2 {
             runs.push(Run {
                 ch,
@@ -485,12 +556,49 @@ mod tests {
     fn emphasis() {
         assert!(has("a **bold** b", "**bold**", Bold));
         assert!(has("a *it* b", "*it*", Italic));
-        assert!(has("a _it_ b", "_it_", Italic));
+        assert!(has("a _u_ b", "_u_", Underline));
+        assert!(has("a __u__ b", "__u__", Underline));
+        assert!(has("<u>x</u>", "<u>x</u>", Underline));
+        assert!(has("<u>x</u>", "</u>", Symbol));
+        assert!(!spans("a __u__ b").iter().any(|(_, st)| *st == Bold));
+        assert!(has("*i* _u_", "*i*", Italic));
+        assert!(
+            has("_a__", "_a__", Underline),
+            "a closing run may end a longer run"
+        );
         assert!(has("~~gone~~", "~~gone~~", Strike));
         let s = spans("***both***");
         assert!(s.contains(&("**both**".into(), Bold)));
         assert!(s.contains(&("***both***".into(), Italic)));
         assert_eq!(s.iter().filter(|(_, st)| *st == Symbol).count(), 4);
+    }
+
+    #[test]
+    fn list_note_title() {
+        let s = spans("# List\n# Heading");
+        assert!(s.contains(&("# List".into(), ListTitle)));
+        assert!(!s.contains(&("# List".into(), Heading(1))));
+        assert!(s.contains(&("# Heading".into(), Heading(1))));
+        // Only the first line, and only the word "list".
+        assert!(!has("x\nlist", "list", ListTitle));
+        assert!(!has("lists", "lists", ListTitle));
+        assert_eq!(
+            highlight_line("list: food", false, true).0[0].style,
+            ListTitle
+        );
+        assert!(highlight_line("list: food", false, false).0.is_empty());
+    }
+
+    #[test]
+    fn underscores_underline_not_inside_words() {
+        assert!(highlight("snake_case_name").is_empty());
+        assert!(has("x _a b_ y", "_a b_", Underline));
+        assert!(!has("a_b_ c", "_b_", Underline));
+        assert!(has("**b** _u_ *i*", "**b**", Bold));
+        assert!(has("**b** _u_ *i*", "_u_", Underline));
+        assert!(has("**b** _u_ *i*", "*i*", Italic));
+        // Inside code nothing is underlined.
+        assert!(!spans("`_x_`").iter().any(|(_, st)| *st == Underline));
     }
 
     #[test]

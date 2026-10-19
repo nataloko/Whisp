@@ -63,7 +63,7 @@ fn parse(units: &[u16], (start, len): (usize, usize), text: u64, fence: bool) ->
     let line_units = &units[start..start + len];
     // Lone surrogates become U+FFFD, still one unit, so offsets hold.
     let (spans, fence_after) =
-        markdown::highlight_line(&String::from_utf16_lossy(line_units), fence);
+        markdown::highlight_line(&String::from_utf16_lossy(line_units), fence, start == 0);
     let runs: Vec<(usize, usize, Attr)> = rtf::runs(len, &spans)
         .into_iter()
         .filter(|r| r.2 != Attr::default())

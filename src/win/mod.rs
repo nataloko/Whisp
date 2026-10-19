@@ -1,5 +1,6 @@
 //! The main window: note navigation, saving, theme, DPI and shortcuts.
 
+mod actions;
 mod canvas;
 mod editor;
 mod ocr;
@@ -58,6 +59,8 @@ const WM_RESTYLE: u32 = WM_APP + 1;
 
 #[derive(Clone, Copy)]
 enum Nav {
+    /// The oldest note.
+    First,
     Older,
     Newer,
     /// The empty note after the newest.
@@ -330,6 +333,7 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             settings: RefCell::new(settings),
         }));
         APP.with(|a| a.set(app).ok());
+        actions::install_cursor_hook();
 
         app.theme.get().apply_to_frame(hwnd);
         app.editor().apply_theme(&app.theme.get());
@@ -496,6 +500,10 @@ impl App {
                 return None;
             }
             WM_CLOSE => self.close(),
+            // Alt pressed and released alone would enter the (missing) menu
+            // bar, and the next key would go there; Alt+Space still opens the
+            // window menu.
+            WM_SYSCOMMAND if (wparam.0 & 0xfff0) as u32 == SC_KEYMENU && lparam.0 == 0 => {}
             WM_QUERYENDSESSION => return Some(LRESULT(self.flush() as isize)),
             WM_ENDSESSION => {
                 self.save_placement();
@@ -665,6 +673,7 @@ impl App {
         let removed = self.drop_if_blank();
         let len = self.notes.borrow().len();
         let target = match nav {
+            Nav::First => 0,
             Nav::Older => current.saturating_sub(1),
             Nav::Newer if removed => current,
             Nav::Newer => current + 1,
@@ -750,11 +759,20 @@ impl App {
             self.next_paper();
             return true;
         }
-        // Alt+Up and Alt+Down, again without Ctrl: move the line.
+        // Alt+Up and Alt+Down, again without Ctrl: move the line. Alt+F and
+        // Alt+L: the first note and the last page (the empty note).
         if msg.message == WM_SYSKEYDOWN && !down(VK_CONTROL) {
             let up = match VIRTUAL_KEY(msg.wParam.0 as u16) {
                 VK_UP => true,
                 VK_DOWN => false,
+                VK_F => {
+                    self.go_first();
+                    return true;
+                }
+                VK_L => {
+                    self.go(Nav::Last);
+                    return true;
+                }
                 _ => return false,
             };
             self.editor()
@@ -776,6 +794,8 @@ impl App {
             }
             match key {
                 VK_INSERT if shift => self.paste(),
+                // Backspace on a lone box in a list note removes the line.
+                VK_BACK if !shift => return self.backspace_key(),
                 // Shift+Delete deletes the note, as in Whisp.
                 VK_DELETE if shift => self.delete_note(),
                 // A complete `::command` before the caret expands, with the
@@ -805,10 +825,22 @@ impl App {
             VK_D => self.delete_note(),
             VK_T if shift => self.restore_note(),
             VK_F => self.open_search(),
+            VK_V if shift => self.paste_stripped(),
             VK_V => self.paste(),
+            // Note commands win over Whisp's Ctrl+Shift+C/S editing keys.
+            VK_C if shift => self.copy_note(),
+            VK_S if shift => self.export_note(),
             VK_S => {
                 self.editor().list_action(lists::toggle_checkbox, false);
             }
+            VK_B if shift => self.bump_note(),
+            VK_B => self.wrap_key("**"),
+            VK_I => self.wrap_key("*"),
+            VK_U => self.wrap_key("_"),
+            VK_X if shift => self.wrap_key("~~"),
+            VK_L => self.shorten_link(),
+            VK_Q => self.close(),
+            VK_BACK if !shift => return self.ctrl_backspace_key(),
             // Ctrl+Tab outdents, as in Whisp.
             VK_TAB => {
                 self.editor().list_action(lists::shift_tab, false);
@@ -835,7 +867,7 @@ impl App {
         // picture of it on the clipboard, and the text is what the user
         // means. Whisp checks for an image first; this differs on purpose.
         if ocr::clipboard_has_text() {
-            self.editor().paste_plain();
+            self.paste_text();
             return;
         }
         if !ocr::clipboard_has_image() {
