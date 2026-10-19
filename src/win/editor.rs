@@ -12,7 +12,7 @@ use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::{
-    EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETRECT, SetWindowTheme,
+    EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETREADONLY, EM_SETRECT, SetWindowTheme,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
@@ -44,8 +44,13 @@ unsafe fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
 }
 
 impl Editor {
-    pub fn create(parent: HWND, instance: HINSTANCE) -> windows::core::Result<Editor> {
-        let style = (WS_CHILD | WS_VISIBLE | WS_VSCROLL).0 | (ES_MULTILINE | ES_AUTOVSCROLL) as u32;
+    pub fn create(
+        parent: HWND,
+        instance: HINSTANCE,
+        visible: bool,
+    ) -> windows::core::Result<Editor> {
+        let shown = if visible { WS_VISIBLE } else { WINDOW_STYLE(0) };
+        let style = (WS_CHILD | shown | WS_VSCROLL).0 | (ES_MULTILINE | ES_AUTOVSCROLL) as u32;
         // SAFETY: plain window creation and messages without pointers, except
         // EM_GETOLEINTERFACE which writes one pointer to a live local.
         unsafe {
@@ -112,6 +117,13 @@ impl Editor {
             rc.bottom -= pad;
             send(self.hwnd, EM_SETRECT, 0, &rc as *const RECT as isize);
         }
+    }
+
+    /// Read only editors ignore typing and paste, so input that still
+    /// reaches the editor that is not current cannot change it unseen.
+    pub fn set_read_only(&self, on: bool) {
+        // SAFETY: no pointers.
+        unsafe { send(self.hwnd, EM_SETREADONLY, usize::from(on), 0) };
     }
 
     pub fn apply_theme(&self, theme: &Theme) {

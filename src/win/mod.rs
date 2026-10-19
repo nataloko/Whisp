@@ -1,13 +1,16 @@
 //! The main window: note navigation, saving, theme, DPI and shortcuts.
 
 mod editor;
+mod swipe;
 mod theme;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, HDC};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
@@ -15,8 +18,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
+use crate::gesture::Side;
 use crate::notes;
 use editor::Editor;
+use swipe::SwipeState;
 use theme::Theme;
 
 const CLASS: PCWSTR = w!("WhispWinWindow");
@@ -37,7 +42,18 @@ enum Nav {
 
 struct App {
     hwnd: HWND,
-    editor: Editor,
+    instance: HINSTANCE,
+    /// The current editor and the peek editor used while swiping, which
+    /// swap roles when a swipe moves to the neighbour. The peek editor is
+    /// created on first use.
+    editors: [OnceCell<Editor>; 2],
+    /// Index into `editors` of the current editor.
+    active: Cell<usize>,
+    swipe: RefCell<SwipeState>,
+    /// The note in the peek editor: its side and index.
+    peek: Cell<Option<(Side, usize)>>,
+    /// Start of the clock for gesture times.
+    epoch: Instant,
     dir: PathBuf,
     /// Saved notes, oldest first. Index `notes.len()` is the empty note at
     /// the end, which gets a file once it has text.
@@ -127,7 +143,7 @@ pub fn run() {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            if app.shortcut(&msg) {
+            if app.intercept(&mut msg) {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -154,7 +170,8 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             WINDOW_EX_STYLE::default(),
             CLASS,
             w!("Whisp"),
-            WS_OVERLAPPEDWINDOW,
+            // Clipping the editors keeps background painting off them while they move.
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             scale(420, sys_dpi),
@@ -169,12 +186,17 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
             let _ = SetWindowPos(hwnd, None, 0, 0, scale(420, dpi), scale(600, dpi), flags);
         }
-        let editor = Editor::create(hwnd, instance)?;
+        let editor = Editor::create(hwnd, instance, true)?;
 
         let current = list.len().saturating_sub(1);
         let app: &'static App = Box::leak(Box::new(App {
             hwnd,
-            editor,
+            instance,
+            editors: [OnceCell::from(editor), OnceCell::new()],
+            active: Cell::new(0),
+            swipe: RefCell::new(SwipeState::Idle),
+            peek: Cell::new(None),
+            epoch: Instant::now(),
             dir,
             notes: RefCell::new(list),
             current: Cell::new(current),
@@ -188,11 +210,11 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
         APP.with(|a| a.set(app).ok());
 
         app.theme.get().apply_to_frame(hwnd);
-        app.editor.apply_theme(&app.theme.get());
+        app.editor().apply_theme(&app.theme.get());
         app.layout();
         app.show(current);
         let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
-        let _ = SetFocus(Some(app.editor.hwnd));
+        let _ = SetFocus(Some(app.editor().hwnd));
         Ok(app)
     }
 }
@@ -208,15 +230,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 impl App {
     fn message(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
-            WM_SIZE => self.layout(),
+            WM_SIZE => {
+                self.cancel_swipe();
+                self.layout();
+            }
+            WM_ACTIVATE => {
+                if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
+                    self.finish_swipe();
+                }
+                return None;
+            }
             WM_SETFOCUS => {
                 // SAFETY: the editor is a live child window.
-                let _ = unsafe { SetFocus(Some(self.editor.hwnd)) };
+                let _ = unsafe { SetFocus(Some(self.editor().hwnd)) };
             }
-            // The editor covers the whole client area.
-            WM_ERASEBKGND => return Some(LRESULT(1)),
+            // Only what the editors leave uncovered, as at the ends of a swipe.
+            WM_ERASEBKGND => {
+                let mut rc = RECT::default();
+                // SAFETY: wparam is the DC to erase; the brush is deleted after use.
+                unsafe {
+                    let _ = GetClientRect(self.hwnd, &mut rc);
+                    let brush = CreateSolidBrush(self.theme.get().background);
+                    FillRect(HDC(wparam.0 as *mut _), &rc, brush);
+                    let _ = DeleteObject(brush.into());
+                }
+                return Some(LRESULT(1));
+            }
             WM_COMMAND
-                if lparam.0 == self.editor.hwnd.0 as isize
+                if lparam.0 == self.editor().hwnd.0 as isize
                     && (wparam.0 >> 16) as u32 == EN_CHANGE =>
             {
                 self.changed();
@@ -225,7 +266,7 @@ impl App {
             WM_RESTYLE => {
                 self.restyle_posted.set(false);
                 self.busy.set(true);
-                self.editor.restyle_changes(&self.theme.get());
+                self.editor().restyle_changes(&self.theme.get());
                 self.busy.set(false);
             }
             WM_DPICHANGED => {
@@ -271,21 +312,39 @@ impl App {
         Some(LRESULT(0))
     }
 
+    /// The current editor.
+    fn editor(&self) -> &Editor {
+        self.editors[self.active.get()]
+            .get()
+            .expect("the current editor exists")
+    }
+
+    /// Both editors at rest: the current one filling the window, the peek
+    /// editor hidden behind it with the same size and padding.
     fn layout(&self) {
         let mut rc = RECT::default();
-        // SAFETY: `rc` is a live local; both windows are alive.
+        // SAFETY: `rc` is a live local; the windows are alive.
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut rc);
-            let _ = MoveWindow(self.editor.hwnd, 0, 0, rc.right, rc.bottom, true);
+            for (i, editor) in self.editors.iter().enumerate() {
+                let Some(editor) = editor.get() else { continue };
+                let _ = MoveWindow(editor.hwnd, 0, 0, rc.right, rc.bottom, true);
+                if i != self.active.get() {
+                    let _ = ShowWindow(editor.hwnd, SW_HIDE);
+                }
+                editor.set_padding(self.dpi.get());
+            }
         }
-        self.editor.set_padding(self.dpi.get());
     }
 
     fn retheme(&self) {
+        self.finish_swipe();
         let theme = Theme::current();
         self.theme.set(theme);
         theme.apply_to_frame(self.hwnd);
-        self.editor.apply_theme(&theme);
+        for editor in self.editors.iter().filter_map(OnceCell::get) {
+            editor.apply_theme(&theme);
+        }
         // SAFETY: plain call; makes the title bar repaint in the new colours.
         unsafe {
             let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
@@ -297,7 +356,7 @@ impl App {
     /// Restyles after a theme change.
     fn restyle(&self) {
         self.busy.set(true);
-        self.editor.restyle(&self.theme.get());
+        self.editor().restyle(&self.theme.get());
         self.busy.set(false);
     }
 
@@ -321,10 +380,12 @@ impl App {
     }
 
     fn timer(&self, id: usize) {
-        // SAFETY: plain call.
-        let _ = unsafe { KillTimer(Some(self.hwnd), id) };
         if id == TIMER_SAVE {
+            // SAFETY: plain call.
+            let _ = unsafe { KillTimer(Some(self.hwnd), id) };
             self.flush();
+        } else {
+            self.swipe_timer(id);
         }
     }
 
@@ -349,7 +410,7 @@ impl App {
     }
 
     fn save(&self) -> std::io::Result<()> {
-        let text = self.editor.text();
+        let text = self.editor().text();
         let path = self.notes.borrow().get(self.current.get()).cloned();
         match path {
             Some(path) => notes::write_atomic(&path, &text),
@@ -371,7 +432,7 @@ impl App {
         let Some(path) = self.notes.borrow().get(current).cloned() else {
             return false;
         };
-        if !notes::is_blank(&self.editor.text()) {
+        if !notes::is_blank(&self.editor().text()) {
             return false;
         }
         let _ = fs::remove_file(&path);
@@ -412,7 +473,7 @@ impl App {
             }
         };
         self.busy.set(true);
-        self.editor.load(&text, &self.theme.get());
+        self.editor().load(&text, &self.theme.get());
         self.busy.set(false);
         self.current.set(index);
         self.dirty.set(false);
@@ -429,6 +490,7 @@ impl App {
     }
 
     fn close(&self) {
+        self.finish_swipe();
         // SAFETY: plain calls on our own window.
         unsafe {
             if self.flush() {
@@ -465,7 +527,7 @@ impl App {
         let shift = down(VK_SHIFT);
         if !down(VK_CONTROL) {
             if shift && key == VK_INSERT {
-                self.editor.paste_plain();
+                self.editor().paste_plain();
                 return true;
             }
             return false;
@@ -475,7 +537,7 @@ impl App {
             VK_OEM_6 => self.go(Nav::Newer),
             VK_OEM_4 => self.go(Nav::Older),
             VK_N => self.go(Nav::Last),
-            VK_V => self.editor.paste_plain(),
+            VK_V => self.editor().paste_plain(),
             VK_A if !shift => return false,
             VK_C | VK_X | VK_Z | VK_Y => return false,
             // Any other Ctrl + letter, digit or punctuation key is a RichEdit

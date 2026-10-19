@@ -4,6 +4,7 @@
 // them everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod gesture;
 mod lines;
 mod markdown;
 mod notes;
