@@ -19,10 +19,14 @@ pub struct Look {
     pub comment: Rgb,
     pub quote: Rgb,
     pub code_background: Rgb,
+    /// The font's face name.
+    pub face: String,
     /// Base font size in half points.
     pub size: u32,
     /// H1 to H3 sizes in half points.
     pub heading_sizes: [u32; 3],
+    /// Line spacing in twentieths of a line: 20 is single spacing.
+    pub line_spacing: u32,
 }
 
 impl Look {
@@ -172,7 +176,15 @@ fn flatten(len: usize, spans: &[Span], hide: impl Fn(&Span) -> bool) -> Vec<(usi
 pub fn document(text: &str, spans: &[Span], look: &Look, hide: Option<Range<usize>>) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut out = String::with_capacity(units.len() + units.len() / 4 + 512);
-    out.push_str(r"{\rtf1\ansi\deff0\uc1{\fonttbl{\f0\fmodern Consolas;}}{\colortbl;");
+    out.push_str(r"{\rtf1\ansi\deff0\uc1{\fonttbl{\f0\fnil ");
+    // A semicolon would end the name; no real font has one.
+    let face: Vec<u16> = look
+        .face
+        .encode_utf16()
+        .filter(|&u| u >= 0x20 && u != u16::from(b';'))
+        .collect();
+    escape(&face, &mut out);
+    out.push_str(r";}}{\colortbl;");
     for (r, g, b) in [
         look.text,
         look.symbol,
@@ -186,7 +198,14 @@ pub fn document(text: &str, spans: &[Span], look: &Look, hide: Option<Range<usiz
     ] {
         let _ = write!(out, r"\red{r}\green{g}\blue{b};");
     }
-    let _ = write!(out, r"}}\pard\plain\f0\fs{}\cf{TEXT} ", look.size);
+    // Every paragraph gets the line spacing as a multiple of single spacing
+    // (\slmult1), in 240ths of a line.
+    let _ = write!(
+        out,
+        r"}}\pard\sl{}\slmult1\plain\f0\fs{}\cf{TEXT} ",
+        look.line_spacing * 12,
+        look.size
+    );
 
     let hidden = |span: &Span| {
         hide.as_ref()
@@ -267,8 +286,10 @@ mod tests {
             comment: (136, 136, 136),
             quote: (157, 165, 180),
             code_background: (50, 50, 50),
+            face: "Consolas".to_string(),
             size: 22,
             heading_sizes: [30, 26, 24],
+            line_spacing: 24,
         }
     }
 
@@ -371,6 +392,30 @@ mod tests {
     fn empty_text() {
         let doc = rtf("");
         assert!(doc.ends_with(r"\cf1 }"));
+        assert_eq!(extract(&doc), "");
+    }
+
+    #[test]
+    fn font_and_line_spacing_in_the_header() {
+        let doc = rtf("a\nb");
+        assert!(doc.contains(r"{\fonttbl{\f0\fnil Consolas;}}"), "{doc}");
+        assert!(
+            doc.contains(r"\pard\sl288\slmult1\plain\f0\fs22\cf1 "),
+            "{doc}"
+        );
+        // Line spacing 2.0 and a face that needs escaping.
+        let look = Look {
+            face: "Fancy {Font}; \\ é".to_string(),
+            line_spacing: 40,
+            ..look()
+        };
+        let doc = document("", &[], &look, None);
+        assert!(
+            doc.contains(r"{\fonttbl{\f0\fnil Fancy \{Font\} \\ \u233?;}}"),
+            "{doc}"
+        );
+        assert!(doc.contains(r"\sl480\slmult1"), "{doc}");
+        assert!(doc.is_ascii());
         assert_eq!(extract(&doc), "");
     }
 

@@ -26,10 +26,30 @@ use crate::lists;
 use crate::{markdown, notes, rtf};
 
 const CF_UNICODETEXT: u32 = 13;
-/// Base font size in twips (1/20 pt): 11 pt.
-const FONT_SIZE: i32 = 220;
-/// H1 to H3 sizes in twips.
+/// H1 to H3 sizes in twips (1/20 pt) for an 11 pt base (`HEADING_BASE`).
+/// Other base sizes keep these proportions.
 const HEADING_SIZES: [i32; 3] = [300, 260, 240];
+const HEADING_BASE: i32 = 220;
+/// PARAFORMAT2's line spacing rule: `dyLineSpacing` / 20 lines.
+const SPACING_MULTIPLE: u8 = 5;
+
+/// The font and line spacing of the note text, from the settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextFont {
+    pub face: String,
+    /// In points.
+    pub size: u32,
+    /// In twentieths of a line: 20 is single spacing.
+    pub spacing: u32,
+}
+
+impl TextFont {
+    /// The base size in twips.
+    fn twips(&self) -> i32 {
+        self.size as i32 * 20
+    }
+}
+
 pub struct Editor {
     pub hwnd: HWND,
     /// Text Object Model access, to style ranges without moving the
@@ -40,6 +60,7 @@ pub struct Editor {
     /// The hide symbols mode: hideable markers are hidden, except on the
     /// caret's line.
     hide: Cell<bool>,
+    font: RefCell<TextFont>,
 }
 
 /// SendMessageW for RichEdit messages.
@@ -55,6 +76,7 @@ impl Editor {
         parent: HWND,
         instance: HINSTANCE,
         visible: bool,
+        font: &TextFont,
     ) -> windows::core::Result<Editor> {
         let shown = if visible { WS_VISIBLE } else { WINDOW_STYLE(0) };
         // WS_CLIPSIBLINGS: never paint over the suggestion popup above.
@@ -90,7 +112,7 @@ impl Editor {
             // Before any text goes in: text streamed into an empty control
             // takes the default format.
             let mut cf = format();
-            set_face(&mut cf);
+            set_face(&mut cf, &font.face);
             send(
                 hwnd,
                 EM_SETCHARFORMAT,
@@ -114,6 +136,7 @@ impl Editor {
                 doc,
                 styled: RefCell::new(Vec::new()),
                 hide: Cell::new(false),
+                font: RefCell::new(font.clone()),
             })
         }
     }
@@ -143,6 +166,11 @@ impl Editor {
     pub fn set_read_only(&self, on: bool) {
         // SAFETY: no pointers.
         unsafe { send(self.hwnd, EM_SETREADONLY, usize::from(on), 0) };
+    }
+
+    /// Sets the font and line spacing for the next load or restyle.
+    pub fn set_font(&self, font: &TextFont) {
+        *self.font.borrow_mut() = font.clone();
     }
 
     pub fn apply_theme(&self, theme: &Theme) {
@@ -208,7 +236,7 @@ impl Editor {
         self.hide.set(hide);
         let spans = markdown::highlight(text);
         let expected = to_cr(text);
-        let look = look(theme);
+        let look = self.look(theme);
         let last = lines::line_of(&expected, expected.len());
         let last_start = expected
             .iter()
@@ -241,6 +269,10 @@ impl Editor {
                 let bytes: Vec<u8> = expected.iter().flat_map(|u| u.to_le_bytes()).collect();
                 self.stream_in(&bytes, SF_TEXT | SF_UNICODE);
                 self.style_lines(&lines, &look);
+                self.set_spacing();
+            } else if expected.is_empty() {
+                // Typing into an empty note continues its one paragraph.
+                self.set_spacing();
             }
             *self.styled.borrow_mut() = states;
             send(self.hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
@@ -364,7 +396,7 @@ impl Editor {
         let revealed = lines::reveal(&mut update.state, &units, hide);
         let restyled = update.lines.len() + revealed.len();
         update.lines.extend(revealed);
-        let runs = self.style_lines(&update.lines, &look(theme));
+        let runs = self.style_lines(&update.lines, &self.look(theme));
         let parsed = update.parsed.len();
         *self.styled.borrow_mut() = update.state;
         let report = format!(
@@ -621,25 +653,71 @@ impl Editor {
             | CFM_HIDDEN;
         cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
         // Rounded to half points like the RTF and TOM sizes.
-        cf.Base.yHeight = look(theme).size as i32 * 10;
+        let look = self.look(theme);
+        cf.Base.yHeight = look.size as i32 * 10;
         cf.Base.crTextColor = theme.text;
         // SAFETY: `cf` outlives both calls.
         unsafe {
             // The face is only set as the default, so RichEdit's own font
-            // fallback for scripts Consolas lacks is kept.
+            // fallback for scripts the font lacks is kept.
             send(
                 self.hwnd,
                 EM_SETCHARFORMAT,
                 SCF_ALL as usize,
                 &cf as *const _ as isize,
             );
-            set_face(&mut cf);
+            set_face(&mut cf, &look.face);
             send(
                 self.hwnd,
                 EM_SETCHARFORMAT,
                 SCF_DEFAULT as usize,
                 &cf as *const _ as isize,
             );
+        }
+    }
+
+    /// Gives every paragraph the line spacing, as the RTF does. Selects
+    /// everything; the caller places the caret afterwards. Paragraphs
+    /// typed later take it from the one they are split from.
+    fn set_spacing(&self) {
+        let mut pf = PARAFORMAT2::default();
+        pf.Base.cbSize = size_of::<PARAFORMAT2>() as u32;
+        pf.Base.dwMask = PFM_LINESPACING;
+        pf.bLineSpacingRule = SPACING_MULTIPLE;
+        pf.dyLineSpacing = self.font.borrow().spacing as i32;
+        let all = CHARRANGE {
+            cpMin: 0,
+            cpMax: -1,
+        };
+        // SAFETY: `all` and `pf` outlive the calls.
+        unsafe {
+            send(self.hwnd, EM_EXSETSEL, 0, &all as *const _ as isize);
+            send(self.hwnd, EM_SETPARAFORMAT, 0, &pf as *const _ as isize);
+        }
+    }
+
+    /// The theme, font and sizes for RTF. Sizes are in half points,
+    /// rounded. They are not scaled for DPI: RichEdit scales text for the
+    /// monitor itself.
+    fn look(&self, theme: &Theme) -> rtf::Look {
+        let font = self.font.borrow();
+        let base = font.twips();
+        let half_points = |size: i32| ((size + 5) / 10).max(1) as u32;
+        rtf::Look {
+            text: rgb(theme.text),
+            symbol: rgb(theme.symbol),
+            heading: rgb(theme.heading),
+            link: rgb(theme.link),
+            list: rgb(theme.list),
+            checked: rgb(theme.checked),
+            comment: rgb(theme.comment),
+            quote: rgb(theme.quote),
+            code_background: rgb(theme.code_background),
+            face: font.face.clone(),
+            size: half_points(base),
+            heading_sizes: HEADING_SIZES
+                .map(|h| half_points((h * base + HEADING_BASE / 2) / HEADING_BASE)),
+            line_spacing: font.spacing,
         }
     }
 
@@ -759,34 +837,21 @@ fn rgb(c: COLORREF) -> rtf::Rgb {
     (c.0 as u8, (c.0 >> 8) as u8, (c.0 >> 16) as u8)
 }
 
-/// The theme and sizes for RTF. Sizes are in half points, rounded. They are
-/// not scaled for DPI: RichEdit scales text for the monitor itself.
-fn look(theme: &Theme) -> rtf::Look {
-    let half_points = |size: i32| ((size + 5) / 10).max(1) as u32;
-    rtf::Look {
-        text: rgb(theme.text),
-        symbol: rgb(theme.symbol),
-        heading: rgb(theme.heading),
-        link: rgb(theme.link),
-        list: rgb(theme.list),
-        checked: rgb(theme.checked),
-        comment: rgb(theme.comment),
-        quote: rgb(theme.quote),
-        code_background: rgb(theme.code_background),
-        size: half_points(FONT_SIZE),
-        heading_sizes: HEADING_SIZES.map(half_points),
-    }
-}
-
 fn format() -> CHARFORMAT2W {
     let mut cf = CHARFORMAT2W::default();
     cf.Base.cbSize = size_of::<CHARFORMAT2W>() as u32;
     cf
 }
 
-fn set_face(cf: &mut CHARFORMAT2W) {
+/// Sets `face` in `cf`, cut to fit and NUL terminated.
+fn set_face(cf: &mut CHARFORMAT2W, face: &str) {
     cf.Base.dwMask |= CFM_FACE;
-    for (dst, src) in cf.Base.szFaceName.iter_mut().zip("Consolas".encode_utf16()) {
+    let room = cf.Base.szFaceName.len() - 1;
+    cf.Base.szFaceName = [0; 32];
+    for (dst, src) in cf.Base.szFaceName[..room]
+        .iter_mut()
+        .zip(face.encode_utf16())
+    {
         *dst = src;
     }
 }

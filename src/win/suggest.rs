@@ -489,6 +489,11 @@ impl App {
                 editor.stream_replace(from, old_to, &replacement);
                 let caret = start.min(new.len());
                 editor.select(caret, caret);
+                if self.settings.borrow().command_toasts()
+                    && let Some(message) = expand::command_message(token, &rest, &text)
+                {
+                    self.show_status(message);
+                }
                 true
             }
         }

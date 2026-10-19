@@ -90,6 +90,54 @@ impl Settings {
         self.get("confirm_delete") == Some("1")
     }
 
+    /// The editor font's face name (`font_face`): Consolas unless set to a
+    /// name that fits a Windows font name (31 UTF-16 units).
+    pub fn font_face(&self) -> &str {
+        self.get("font_face")
+            .filter(|f| !f.is_empty() && f.encode_utf16().count() <= MAX_FACE_LEN)
+            .unwrap_or(DEFAULT_FONT_FACE)
+    }
+
+    /// The editor font's size in points (`font_size`): a whole number from
+    /// 6 to 72, else 11.
+    pub fn font_size(&self) -> u32 {
+        self.get("font_size")
+            .and_then(|v| v.parse().ok())
+            .filter(|n| FONT_SIZES.contains(n))
+            .unwrap_or(DEFAULT_FONT_SIZE)
+    }
+
+    /// The `line_spacing` setting: one of the `LINE_SPACINGS` values, else
+    /// 1.2 as in Whisp.
+    pub fn line_spacing(&self) -> &'static str {
+        let value = self.get("line_spacing");
+        LINE_SPACINGS
+            .iter()
+            .find(|(v, _)| Some(*v) == value)
+            .map_or(DEFAULT_LINE_SPACING, |(v, _)| v)
+    }
+
+    /// The line spacing in twentieths of a line, as RichEdit counts it: 20
+    /// is single spacing.
+    pub fn line_spacing_twentieths(&self) -> u32 {
+        let value = self.line_spacing();
+        LINE_SPACINGS
+            .iter()
+            .find(|(v, _)| *v == value)
+            .map_or(24, |(_, n)| *n)
+    }
+
+    /// Whether text commands show a confirmation (`command_toasts`). On by
+    /// default, as in Whisp.
+    pub fn command_toasts(&self) -> bool {
+        self.get("command_toasts") != Some("0")
+    }
+
+    /// The notes folder chosen in the preferences (`notes_dir`), if any.
+    pub fn notes_dir(&self) -> Option<&str> {
+        self.get("notes_dir").filter(|d| !d.is_empty())
+    }
+
     /// Sets `key`, replacing its line or adding one at the end.
     pub fn set(&mut self, key: &str, value: &str) {
         let line = format!("{key}={value}");
@@ -132,6 +180,19 @@ pub enum ColorScheme {
     Light,
     Dark,
 }
+
+/// The editor font when none is set, as Whisp for Windows always used.
+pub const DEFAULT_FONT_FACE: &str = "Consolas";
+pub const DEFAULT_FONT_SIZE: u32 = 11;
+/// The font sizes accepted, in points.
+pub const FONT_SIZES: std::ops::RangeInclusive<u32> = 6..=72;
+/// The longest face name a Windows font can have, in UTF-16 units.
+const MAX_FACE_LEN: usize = 31;
+
+/// The `line_spacing` choices of the preferences, each with the spacing in
+/// twentieths of a line.
+pub const LINE_SPACINGS: [(&str, u32); 4] = [("1.0", 20), ("1.2", 24), ("1.5", 30), ("2.0", 40)];
+const DEFAULT_LINE_SPACING: &str = "1.2";
 
 /// The `archive_days` choices of the preferences: days and label.
 pub const ARCHIVE_CHOICES: [(u32, &str); 4] = [
@@ -274,6 +335,48 @@ mod tests {
             Settings::parse("color_scheme=blue").color_scheme(),
             ColorScheme::System
         );
+    }
+
+    #[test]
+    fn font_and_spacing_settings() {
+        let s = Settings::default();
+        assert_eq!((s.font_face(), s.font_size()), ("Consolas", 11));
+        assert_eq!((s.line_spacing(), s.line_spacing_twentieths()), ("1.2", 24));
+        let s = Settings::parse("font_face=Cascadia Mono\nfont_size=14\nline_spacing=2.0");
+        assert_eq!((s.font_face(), s.font_size()), ("Cascadia Mono", 14));
+        assert_eq!((s.line_spacing(), s.line_spacing_twentieths()), ("2.0", 40));
+        assert_eq!(Settings::parse("font_size=6").font_size(), 6);
+        assert_eq!(Settings::parse("font_size=72").font_size(), 72);
+        for bad in ["5", "73", "11.5", "x", "-11", ""] {
+            assert_eq!(Settings::parse(&format!("font_size={bad}")).font_size(), 11);
+        }
+        let long = "x".repeat(32);
+        for bad in ["", long.as_str()] {
+            assert_eq!(
+                Settings::parse(&format!("font_face={bad}")).font_face(),
+                "Consolas"
+            );
+        }
+        for bad in ["1", "1.25", "double"] {
+            let s = Settings::parse(&format!("line_spacing={bad}"));
+            assert_eq!((s.line_spacing(), s.line_spacing_twentieths()), ("1.2", 24));
+        }
+        assert_eq!(
+            Settings::parse("line_spacing=1.5").line_spacing_twentieths(),
+            30
+        );
+    }
+
+    #[test]
+    fn toasts_and_notes_folder_settings() {
+        let s = Settings::default();
+        assert!(s.command_toasts());
+        assert_eq!(s.notes_dir(), None);
+        let s = Settings::parse("command_toasts=0\nnotes_dir=D:\\Notes");
+        assert!(!s.command_toasts());
+        assert_eq!(s.notes_dir(), Some("D:\\Notes"));
+        assert!(Settings::parse("command_toasts=1").command_toasts());
+        assert_eq!(Settings::parse("notes_dir=").notes_dir(), None);
     }
 
     #[test]

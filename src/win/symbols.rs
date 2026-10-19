@@ -44,7 +44,7 @@ impl App {
                     let Some(name) = file_name(&path) else {
                         return;
                     };
-                    match metadata::update_flag(&self.dir, name, "wysiwyg", on) {
+                    match metadata::update_flag(&self.dir(), name, "wysiwyg", on) {
                         Ok(meta) => *self.meta.borrow_mut() = meta,
                         Err(_) => {
                             self.show_status("Could not save the setting");
@@ -83,7 +83,7 @@ impl App {
         let Some(name) = file_name(path) else {
             return;
         };
-        match metadata::update_flag(&self.dir, name, "wysiwyg", true) {
+        match metadata::update_flag(&self.dir(), name, "wysiwyg", true) {
             Ok(meta) => *self.meta.borrow_mut() = meta,
             Err(_) => self.show_status("Could not save the setting"),
         }

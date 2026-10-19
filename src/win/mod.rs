@@ -13,6 +13,7 @@ mod swipe;
 mod symbols;
 mod theme;
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,12 +41,13 @@ use crate::carousel;
 use crate::gesture::Side;
 use crate::lists;
 use crate::metadata::Metadata;
+use crate::migrate;
 use crate::notes;
 use crate::paper::Paper;
 use crate::search::{Index, Row};
 use crate::settings::{self, Placement, Settings, Startup};
 use crate::trash;
-use editor::Editor;
+use editor::{Editor, TextFont};
 use keys_ui::KeysWindow;
 use ocr::WM_OCR_DONE;
 use prefs::Prefs;
@@ -97,7 +99,9 @@ struct App {
     peek: Cell<Option<(Side, usize)>>,
     /// Start of the clock for gesture times.
     epoch: Instant,
-    dir: PathBuf,
+    /// The notes folder. It only changes when the notes are moved in the
+    /// preferences.
+    dir: RefCell<PathBuf>,
     /// Saved notes: pinned ones first, then the rest, each oldest first.
     /// Index `notes.len()` is the empty note at the end, which gets a file
     /// once it has text.
@@ -121,7 +125,7 @@ struct App {
     /// An image is being read.
     ocr_running: Cell<bool>,
     /// A passing message shown in the title, cleared by TIMER_STATUS.
-    status: RefCell<Option<&'static str>>,
+    status: RefCell<Option<Cow<'static, str>>>,
     /// The search panel (Ctrl+F), created on first use.
     search: OnceCell<Panel>,
     search_open: Cell<bool>,
@@ -199,7 +203,11 @@ pub fn run() {
         }
     }
 
-    let Some(dir) = notes::notes_dir() else {
+    let settings_dir = settings::dir();
+    let settings = settings_dir
+        .as_deref()
+        .map_or_else(Settings::default, Settings::load);
+    let Some(dir) = notes::notes_dir(settings.notes_dir()) else {
         error_box("Cannot find the notes folder: LOCALAPPDATA is not set.");
         return;
     };
@@ -213,7 +221,7 @@ pub fn run() {
             return;
         }
     };
-    let app = match create(dir, list) {
+    let app = match create(dir, list, settings_dir, settings) {
         Ok(app) => app,
         Err(e) => {
             error_box(&format!("Cannot create the window:\n{e}"));
@@ -243,7 +251,12 @@ pub fn run() {
     }
 }
 
-fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Result<&'static App> {
+fn create(
+    dir: PathBuf,
+    list: Vec<(PathBuf, SystemTime)>,
+    settings_dir: Option<PathBuf>,
+    settings: Settings,
+) -> windows::core::Result<&'static App> {
     // SAFETY: window creation on this thread; the class name is static.
     unsafe {
         LoadLibraryW(w!("Msftedit.dll"))?;
@@ -275,10 +288,6 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
         RegisterClassExW(&class);
         prefs::register(instance)?;
         keys_ui::register(instance)?;
-        let settings_dir = settings::dir();
-        let settings = settings_dir
-            .as_deref()
-            .map_or_else(Settings::default, Settings::load);
         let sys_dpi = GetDpiForSystem();
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -330,18 +339,12 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             }
         };
         let dpi = GetDpiForWindow(hwnd);
-        let editor = Editor::create(hwnd, instance, true)?;
+        let editor = Editor::create(hwnd, instance, true, &text_font(&settings))?;
 
         let paper = Paper::parse(settings.get("paper").unwrap_or(""));
         let theme = Theme::for_scheme(settings.color_scheme());
         let meta = Metadata::load(&dir).unwrap_or_default();
-        let list = carousel::arrange(
-            list,
-            SystemTime::now(),
-            settings.archive_days(),
-            settings.max_carousel_size() as usize,
-            |p| is_pinned(&meta, p),
-        );
+        let list = arrange(list, &settings, &meta);
         let current = start_index(&list, &settings);
         let app: &'static App = Box::leak(Box::new(App {
             hwnd,
@@ -351,7 +354,7 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             swipe: RefCell::new(SwipeState::Idle),
             peek: Cell::new(None),
             epoch: Instant::now(),
-            dir,
+            dir: RefCell::new(dir),
             notes: RefCell::new(list),
             current: Cell::new(current),
             dirty: Cell::new(false),
@@ -583,6 +586,11 @@ impl App {
         }
     }
 
+    /// The notes folder.
+    fn dir(&self) -> PathBuf {
+        self.dir.borrow().clone()
+    }
+
     /// The current editor.
     fn editor(&self) -> &Editor {
         self.editors[self.active.get()]
@@ -636,6 +644,83 @@ impl App {
         self.busy.set(true);
         self.editor().restyle(&self.theme.get());
         self.busy.set(false);
+    }
+
+    /// The font or line spacing setting changed: both editors take it and
+    /// reload their text, as after a theme change.
+    fn refont(&self) {
+        self.hide_suggestions();
+        self.finish_swipe();
+        let font = text_font(&self.settings.borrow());
+        let theme = self.theme.get();
+        self.busy.set(true);
+        for editor in self.editors.iter().filter_map(OnceCell::get) {
+            editor.set_font(&font);
+            editor.restyle(&theme);
+        }
+        self.busy.set(false);
+    }
+
+    /// Moves the notes into `new` and uses that folder from now on, saving
+    /// `setting` as `notes_dir` (empty for the default folder). Nothing
+    /// changes if the current note cannot be saved first or `new` cannot be
+    /// created. Afterwards the notes are loaded again as at startup, showing
+    /// the note that was current if it moved, else the newest note.
+    fn move_notes(&self, new: &Path, setting: &str) {
+        self.finish_swipe();
+        self.hide_suggestions();
+        if !self.flush() {
+            self.show_status("Could not save the note; the notes did not move");
+            return;
+        }
+        let old = self.dir();
+        if notes::same_dir(&old, new) {
+            self.save_setting("notes_dir", setting);
+            return;
+        }
+        let report = match migrate::move_notes(&old, new) {
+            Ok(report) => report,
+            Err(_) => {
+                self.show_status("Could not move the notes");
+                return;
+            }
+        };
+        self.save_setting("notes_dir", setting);
+        *self.dir.borrow_mut() = new.to_path_buf();
+        let current = self
+            .notes
+            .borrow()
+            .get(self.current.get())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| report.moved.contains(n));
+        let meta = Metadata::load(new).unwrap_or_default();
+        let list = arrange(
+            notes::list(new).unwrap_or_default(),
+            &self.settings.borrow(),
+            &meta,
+        );
+        *self.meta.borrow_mut() = meta;
+        let index = current
+            .and_then(|name| {
+                list.iter()
+                    .position(|p| p.file_name().is_some_and(|n| *n == *name))
+            })
+            .unwrap_or(list.len().saturating_sub(1));
+        *self.notes.borrow_mut() = list;
+        // The peek editor may hold a note from the old folder.
+        self.peek.set(None);
+        *self.index.borrow_mut() = Index::default();
+        if self.search_open.get() {
+            let _ = self.index.borrow_mut().refresh(new);
+            self.run_search();
+        }
+        self.show(index);
+        self.show_status(if report.complete() {
+            "Notes moved"
+        } else {
+            "Some notes stayed in the old folder"
+        });
     }
 
     /// The user changed the text. Only records it: RichEdit is still in the
@@ -712,7 +797,7 @@ impl App {
             // The empty note gets a file once it has text.
             None if notes::is_blank(&text) => Ok(()),
             None => {
-                let path = notes::new_path(&self.dir);
+                let path = notes::new_path(&self.dir());
                 notes::write_atomic(&path, &text)?;
                 self.new_note_saved(&path);
                 self.notes.borrow_mut().push(path);
@@ -791,7 +876,7 @@ impl App {
             .is_some_and(|p| self.is_pinned(p));
         let pin = if pinned { " \u{b7} Pinned" } else { "" };
         let mark = if self.save_failed.get() { " *" } else { "" };
-        let status = match *self.status.borrow() {
+        let status = match self.status.borrow().as_deref() {
             Some(message) => format!(" \u{b7} {message}"),
             None if self.ocr_running.get() => " \u{b7} Reading image\u{2026}".to_string(),
             None if self.search_open.get() => " \u{b7} Search".to_string(),
@@ -1028,12 +1113,12 @@ impl App {
     }
 
     /// Shows `message` in the title for a few seconds.
-    fn show_status(&self, message: &'static str) {
+    fn show_status(&self, message: impl Into<Cow<'static, str>>) {
         self.show_status_for(message, STATUS_MS);
     }
 
-    fn show_status_for(&self, message: &'static str, ms: u32) {
-        self.status.replace(Some(message));
+    fn show_status_for(&self, message: impl Into<Cow<'static, str>>, ms: u32) {
+        self.status.replace(Some(message.into()));
         self.update_title();
         // SAFETY: a timer on our own window; restarting it resets its delay.
         unsafe { SetTimer(Some(self.hwnd), TIMER_STATUS, ms, None) };
@@ -1131,7 +1216,7 @@ impl App {
         if self.settings.borrow().confirm_delete() && !self.confirm_delete() {
             return;
         }
-        match trash::delete(&self.dir, &path) {
+        match trash::delete(&self.dir(), &path) {
             Ok(name) => {
                 let mut deleted = self.deleted();
                 deleted.push(name);
@@ -1190,11 +1275,11 @@ impl App {
         }
         let mut deleted = self.deleted();
         while let Some(name) = deleted.pop() {
-            if !trash::is_in_trash(&self.dir, &name) {
+            if !trash::is_in_trash(&self.dir(), &name) {
                 // Emptied or restored by Whisp meanwhile.
                 continue;
             }
-            let Ok(path) = trash::restore(&self.dir, &name) else {
+            let Ok(path) = trash::restore(&self.dir(), &name) else {
                 self.show_status("Could not restore the note");
                 return;
             };
@@ -1218,6 +1303,27 @@ fn modified(path: &Path) -> SystemTime {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// The carousel at startup, or after the notes moved: `list` arranged by
+/// the archive and size settings, pinned notes first.
+fn arrange(list: Vec<(PathBuf, SystemTime)>, settings: &Settings, meta: &Metadata) -> Vec<PathBuf> {
+    carousel::arrange(
+        list,
+        SystemTime::now(),
+        settings.archive_days(),
+        settings.max_carousel_size() as usize,
+        |p| is_pinned(meta, p),
+    )
+}
+
+/// The note text's font and line spacing from `settings`.
+fn text_font(settings: &Settings) -> TextFont {
+    TextFont {
+        face: settings.font_face().to_string(),
+        size: settings.font_size(),
+        spacing: settings.line_spacing_twentieths(),
+    }
 }
 
 /// Whether `meta` marks the note at `path` as pinned, by file name.

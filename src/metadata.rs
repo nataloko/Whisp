@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::json::{self, Value};
 use crate::notes;
 
-const FILE: &str = "metadata.json";
+pub const FILE: &str = "metadata.json";
 
 #[derive(Debug)]
 pub enum Error {
@@ -68,6 +68,18 @@ impl Metadata {
             // A damaged entry is replaced, as Whisp's dict update would fail
             // on it; it only happens with a hand edited file.
             other => *other = Value::Object(vec![(key.to_string(), value)]),
+        }
+    }
+
+    /// Takes every entry of `other`, as Python's `dict.update`: an entry
+    /// for the same note is replaced where it is, others are added at the
+    /// end in `other`'s order.
+    pub fn update(&mut self, other: &Metadata) {
+        for (name, value) in &other.entries {
+            match self.entries.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => entry.1 = value.clone(),
+                None => self.entries.push((name.clone(), value.clone())),
+            }
         }
     }
 
@@ -158,6 +170,21 @@ mod tests {
         assert_eq!(
             meta.to_text(),
             r#"{"a.md": {"x": 1, "pinned": true, "wysiwyg": false}, "gone.md": {"pinned": true}, "new.md": {"pinned": true}}"#
+        );
+    }
+
+    #[test]
+    fn update_replaces_whole_entries_in_place() {
+        let parse = |text: &str| match json::parse(text) {
+            Some(Value::Object(entries)) => Metadata { entries },
+            _ => unreachable!(),
+        };
+        let mut new = parse(r#"{"a.md": {"pinned": true, "x": 1}, "b.md": {"pinned": true}}"#);
+        let old = parse(r#"{"c.md": {"wysiwyg": true}, "a.md": {"pinned": false}}"#);
+        new.update(&old);
+        assert_eq!(
+            new.to_text(),
+            r#"{"a.md": {"pinned": false}, "b.md": {"pinned": true}, "c.md": {"wysiwyg": true}}"#
         );
     }
 

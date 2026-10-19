@@ -147,7 +147,7 @@ impl App {
         let Some(panel) = self.search_panel() else {
             return;
         };
-        let _ = self.index.borrow_mut().refresh(&self.dir);
+        let _ = self.index.borrow_mut().refresh(&self.dir());
         self.search_open.set(true);
         self.style_search();
         // SAFETY: plain calls on our own windows.

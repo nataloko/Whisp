@@ -20,7 +20,8 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Documents, FileSaveDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH,
+    FOLDERID_Documents, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
+    IFileOpenDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, s, w};
@@ -232,7 +233,7 @@ impl App {
             return;
         };
         let pin = !self.is_pinned(&path);
-        match metadata::update_flag(&self.dir, name, "pinned", pin) {
+        match metadata::update_flag(&self.dir(), name, "pinned", pin) {
             Ok(meta) => *self.meta.borrow_mut() = meta,
             Err(_) => {
                 self.show_status("Could not save the pin");
@@ -411,6 +412,32 @@ fn save_dialog(owner: HWND, name: &str) -> Option<String> {
     }
 }
 
+/// Shows the folder picker, starting in `start`; the chosen folder, or
+/// `None` when cancelled.
+pub(super) fn folder_dialog(owner: HWND, start: &std::path::Path) -> Option<std::path::PathBuf> {
+    // SAFETY: COM calls on this thread, which is (or becomes) a single
+    // threaded apartment; the returned path is freed with CoTaskMemFree.
+    unsafe {
+        // Once is enough; later calls only report that it is done.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog
+            .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+            .ok()?;
+        if let Some(folder) = shell_item(start) {
+            let _ = dialog.SetFolder(&folder);
+        }
+        dialog.Show(Some(owner)).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = raw.to_string().ok();
+        CoTaskMemFree(Some(raw.0 as *const _));
+        path.map(std::path::PathBuf::from)
+    }
+}
+
 type ShellExecute =
     unsafe extern "system" fn(HWND, PCWSTR, PCWSTR, PCWSTR, PCWSTR, i32) -> HINSTANCE;
 type KnownFolderItem = unsafe extern "system" fn(
@@ -420,6 +447,34 @@ type KnownFolderItem = unsafe extern "system" fn(
     *const GUID,
     *mut *mut core::ffi::c_void,
 ) -> HRESULT;
+
+type ParsingNameItem = unsafe extern "system" fn(
+    PCWSTR,
+    *mut core::ffi::c_void,
+    *const GUID,
+    *mut *mut core::ffi::c_void,
+) -> HRESULT;
+
+/// The folder or file at `path` as a shell item.
+fn shell_item(path: &std::path::Path) -> Option<IShellItem> {
+    let function = shell32(s!("SHCreateItemFromParsingName"))?;
+    let path = HSTRING::from(path.as_os_str());
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: SHCreateItemFromParsingName's signature; `path` outlives the
+    // call, and on success `raw` holds an owned IShellItem.
+    unsafe {
+        let function: ParsingNameItem = std::mem::transmute(function);
+        function(
+            PCWSTR(path.as_ptr()),
+            std::ptr::null_mut(),
+            &IShellItem::IID,
+            &mut raw,
+        )
+        .ok()
+        .ok()?;
+        Some(IShellItem::from_raw(raw))
+    }
+}
 
 /// A function from shell32.dll, loaded on first use rather than at startup.
 fn shell32(name: PCSTR) -> Option<unsafe extern "system" fn() -> isize> {

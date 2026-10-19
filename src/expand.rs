@@ -211,14 +211,7 @@ pub enum Expansion {
 /// The expansion for `token`. `rest` is the note's text without the token,
 /// with `\n` line breaks. `None` when the token is not a command.
 pub fn expand(token: &str, rest: &str, env: &mut dyn Env) -> Option<Expansion> {
-    let body = token.strip_prefix("::")?;
-    let (name, args) = match body.find('(') {
-        Some(open) => {
-            let inner = body[open + 1..].strip_suffix(')')?;
-            (body[..open].to_lowercase(), Some(inner))
-        }
-        None => (body.to_lowercase(), None),
-    };
+    let (name, args) = parse(token)?;
     let insert = |s: String| Some(Expansion::Insert(s));
     match (name.as_str(), args) {
         ("today" | "date" | "tomorrow" | "yesterday" | "timestamp", args) => {
@@ -285,6 +278,68 @@ pub fn expand(token: &str, rest: &str, env: &mut dyn Env) -> Option<Expansion> {
         }
         _ => None,
     }
+}
+
+/// A `::name` or `::name(args)` token: the name in lower case and the text
+/// between the brackets.
+fn parse(token: &str) -> Option<(String, Option<&str>)> {
+    let body = token.strip_prefix("::")?;
+    match body.find('(') {
+        Some(open) => {
+            let inner = body[open + 1..].strip_suffix(')')?;
+            Some((body[..open].to_lowercase(), Some(inner)))
+        }
+        None => Some((body.to_lowercase(), None)),
+    }
+}
+
+/// The confirmation Whisp shows after text command `token` turned the note
+/// `rest` (without the token) into `new`. As in Whisp, there is none when
+/// the text did not change, so "No duplicates found" never shows, and none
+/// for tokens that are not text commands.
+pub fn command_message(token: &str, rest: &str, new: &str) -> Option<String> {
+    if rest == new {
+        return None;
+    }
+    let (name, args) = parse(token)?;
+    let message = match (name.as_str(), args) {
+        ("uppercase", None) => "Converted to uppercase",
+        ("lowercase", None) => "Converted to lowercase",
+        ("title_case", None) => "Converted to Title Case",
+        ("sentence_case", None) => "Converted to Sentence case",
+        ("capitalize_first", None) => "Capitalized first letter",
+        ("remove_quotes", None) => "Stripped quotes",
+        ("sort_lines_alpha", None) => "Sorted lines alphabetically",
+        ("sort_lines_number", None) => "Sorted lines numerically",
+        ("sort_lines_reverse", None) => "Reversed line order",
+        ("remove_lines_empty", None) => "Removed empty lines",
+        ("trim_each_whitespace", None) => "Trimmed whitespace from all lines",
+        ("dedupe_lines", None) => "Removed duplicate lines",
+        ("get_dupes", None) => "Found duplicate lines",
+        ("commas_to_list", None) => "Converted commas to list",
+        ("lines_to_commas", None) => "Converted lines to comma-separated",
+        ("checked_to_bottom", None) => "Moved checked items to bottom",
+        ("remove_checked", None) => "Removed all checked items",
+        ("append", Some(arg)) => return Some(format!("Appended '{arg}'")),
+        ("prepend", Some(arg)) => return Some(format!("Prepended '{arg}'")),
+        ("remove_lines_with", Some(arg)) => {
+            return Some(format!("Removed lines containing '{arg}'"));
+        }
+        ("remove_lines_without", Some(arg)) => {
+            return Some(format!("Removed lines without '{arg}'"));
+        }
+        ("keep_lines_with", Some(arg)) => return Some(format!("Kept lines containing '{arg}'")),
+        ("keep_lines_without", Some(arg)) => return Some(format!("Kept lines without '{arg}'")),
+        ("commas_to", Some(arg)) => return Some(format!("Converted commas to {arg}")),
+        ("lines_to", Some(arg)) => return Some(format!("Converted lines to '{arg}'")),
+        ("replace", Some(args)) => {
+            let (old, _) = args.split_once(',')?;
+            let count = rest.matches(old).count();
+            return Some(format!("Replaced {count} instances"));
+        }
+        _ => return None,
+    };
+    Some(message.to_string())
 }
 
 fn changed(old: &str, new: String) -> Option<String> {
@@ -687,6 +742,72 @@ mod tests {
             Some(Expansion::Text(None)) => rest.to_string(),
             other => panic!("{token}: {other:?}"),
         }
+    }
+
+    /// The message after running `token` on `rest`, as the editor shows it.
+    fn message(token: &str, rest: &str) -> Option<String> {
+        command_message(token, rest, &text(token, rest))
+    }
+
+    #[test]
+    fn command_messages_follow_whisp() {
+        assert_eq!(
+            message("::uppercase", "a").as_deref(),
+            Some("Converted to uppercase")
+        );
+        assert_eq!(
+            message("::Title_Case", "a b").as_deref(),
+            Some("Converted to Title Case")
+        );
+        assert_eq!(
+            message("::append(;)", "a\nb").as_deref(),
+            Some("Appended ';'")
+        );
+        assert_eq!(
+            message("::commas_to( | )", "a,b").as_deref(),
+            Some("Converted commas to  | ")
+        );
+        assert_eq!(
+            message("::lines_to(;)", "a\nb").as_deref(),
+            Some("Converted lines to ';'")
+        );
+        assert_eq!(
+            message("::keep_lines_with(x)", "x\ny").as_deref(),
+            Some("Kept lines containing 'x'")
+        );
+        assert_eq!(
+            message("::replace(a,b)", "banana").as_deref(),
+            Some("Replaced 3 instances")
+        );
+        assert_eq!(
+            message("::get_dupes", "a\na").as_deref(),
+            Some("Found duplicate lines")
+        );
+    }
+
+    #[test]
+    fn no_message_when_nothing_changed_or_no_command() {
+        // Whisp only shows a message for a changed note, so "No duplicates
+        // found" never appears.
+        assert_eq!(message("::get_dupes", "a\nb"), None);
+        assert_eq!(message("::uppercase", "ABC"), None);
+        assert_eq!(message("::replace(x,y)", "abc"), None);
+        assert_eq!(command_message("::today", "a", "b"), None);
+        assert_eq!(command_message("::nothing", "a", "b"), None);
+        assert_eq!(command_message("text", "a", "b"), None);
+    }
+
+    #[test]
+    fn every_text_command_has_a_message() {
+        for command in TEXT_COMMANDS {
+            let token = format!("::{command}");
+            assert!(command_message(&token, "a", "b").is_some(), "{command}");
+        }
+        for command in TEXT_COMMANDS_WITH_ARG {
+            let token = format!("::{command}(x)");
+            assert!(command_message(&token, "a", "b").is_some(), "{command}");
+        }
+        assert!(command_message("::replace(a,b)", "a", "b").is_some());
     }
 
     #[test]

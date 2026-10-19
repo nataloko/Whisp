@@ -11,8 +11,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// when listing; this keeps startup cheap with many notes.
 const BLANK_CHECK_LIMIT: u64 = 4096;
 
-/// `WHISP_NOTES_DIR`, or `%LOCALAPPDATA%\whisp\notes` like Whisp.
-pub fn notes_dir() -> Option<PathBuf> {
+/// The notes folder: `setting` (the `notes_dir` setting) when it is set,
+/// else the default folder.
+pub fn notes_dir(setting: Option<&str>) -> Option<PathBuf> {
+    match setting.filter(|d| !d.is_empty()) {
+        Some(dir) => Some(dir.into()),
+        None => default_dir(),
+    }
+}
+
+/// The default notes folder: `WHISP_NOTES_DIR`, or
+/// `%LOCALAPPDATA%\whisp\notes` like Whisp.
+pub fn default_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("WHISP_NOTES_DIR").filter(|d| !d.is_empty()) {
         return Some(dir.into());
     }
@@ -24,7 +34,16 @@ pub fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-fn is_note(path: &Path) -> bool {
+/// Whether `a` and `b` are the same folder, also when spelled differently.
+/// Folders that do not exist are compared as written.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+pub fn is_note(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
@@ -146,6 +165,30 @@ mod tests {
             .unwrap()
             .set_modified(time)
             .unwrap();
+    }
+
+    #[test]
+    fn folder_setting_wins_over_the_default() {
+        assert_eq!(
+            notes_dir(Some("D:\\Notes")),
+            Some(PathBuf::from("D:\\Notes"))
+        );
+        assert_eq!(notes_dir(Some("")), default_dir());
+        assert_eq!(notes_dir(None), default_dir());
+    }
+
+    #[test]
+    fn same_dir_sees_through_spelling() {
+        let dir = temp_dir("same");
+        fs::create_dir(dir.join("a")).unwrap();
+        assert!(same_dir(
+            &dir.join("a"),
+            &dir.join("a").join("..").join("a")
+        ));
+        assert!(!same_dir(&dir.join("a"), &dir));
+        assert!(same_dir(&dir.join("gone"), &dir.join("gone")));
+        assert!(!same_dir(&dir.join("gone"), &dir.join("a")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

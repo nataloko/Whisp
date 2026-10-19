@@ -13,8 +13,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 
-use super::App;
 use super::editor::Editor;
+use super::{App, text_font};
 use crate::gesture::{self, Settle, Side, Swipe};
 use crate::notes;
 
@@ -70,7 +70,8 @@ impl App {
     pub(super) fn peek_editor(&self) -> Option<&Editor> {
         let slot = &self.editors[1 - self.active.get()];
         if slot.get().is_none() {
-            let editor = Editor::create(self.hwnd, self.instance, false).ok()?;
+            let font = text_font(&self.settings.borrow());
+            let editor = Editor::create(self.hwnd, self.instance, false, &font).ok()?;
             editor.apply_theme(&self.theme.get());
             let _ = slot.set(editor);
             self.layout();

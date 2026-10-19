@@ -14,6 +14,7 @@ mod lists;
 mod markdown;
 mod markup;
 mod metadata;
+mod migrate;
 mod notes;
 mod ocr_text;
 mod paper;

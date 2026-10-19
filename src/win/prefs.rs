@@ -6,19 +6,27 @@
 //! Shift+Tab are handled by `IsDialogMessageW` in `App::popup_message`.
 
 use std::cell::Cell;
+use std::path::Path;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::UI::Controls::Dialogs::{
+    CF_FORCEFONTEXIST, CF_INITTOLOGFONTSTRUCT, CF_LIMITSIZE, CF_NOVERTFONTS, CF_SCREENFONTS,
+    CHOOSEFONTW,
+};
 use windows::Win32::UI::Controls::{COMBOBOXINFO, GetComboBoxInfo, SetWindowTheme};
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_CONTROL, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, SetFocus, VK_CONTROL, VK_ESCAPE,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU, VK_OEM_2, VK_OEM_COMMA};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, s, w};
 
-use super::dialog;
 use super::theme::Theme;
-use super::{App, scale};
+use super::{App, actions, dialog, scale};
+use crate::notes;
 use crate::paper::Paper;
 use crate::settings::{self, Settings};
 
@@ -37,10 +45,20 @@ const HEADING_GAP: i32 = 14;
 const COMBO_HEIGHT: i32 = 28;
 const CHECK_SIZE: i32 = 22;
 const DROP_ROW: i32 = 24;
+/// Height of a push button, and the space between two in one row.
+const BUTTON_HEIGHT: i32 = 28;
+const BUTTON_GAP: i32 = 8;
 
-const ID_CONFIRM_DELETE: u16 = 200;
-/// Static control style: `&` is not a mnemonic.
+/// Check boxes are numbered from here, in order.
+const ID_FIRST_CHECK: u16 = 200;
+const ID_FONT: u16 = 300;
+const ID_FOLDER_CHANGE: u16 = 301;
+const ID_FOLDER_RESET: u16 = 302;
+/// Static control styles: `&` is not a mnemonic; one line, shortened with
+/// an ellipsis in the middle, as for a path.
 const SS_NOPREFIX: u32 = 0x80;
+const SS_LEFTNOWORDWRAP: u32 = 0xc;
+const SS_PATHELLIPSIS: u32 = 0x8000;
 const BN_CLICKED: u32 = 0;
 const CBN_SELCHANGE: u32 = 1;
 
@@ -52,15 +70,40 @@ struct Combo {
     values: Vec<String>,
 }
 
+/// The control, or controls, on the right of a row.
+enum Control {
+    /// A combo box with this many items; its window height includes the
+    /// list.
+    Combo(HWND, usize),
+    Check(HWND),
+    /// Push buttons side by side, sharing the control column.
+    Buttons(Vec<HWND>),
+}
+
+impl Control {
+    fn windows(&self) -> &[HWND] {
+        match self {
+            Control::Combo(hwnd, _) | Control::Check(hwnd) => std::slice::from_ref(hwnd),
+            Control::Buttons(buttons) => buttons,
+        }
+    }
+}
+
+/// A row's dim subtitle.
+struct Sub {
+    hwnd: HWND,
+    text: String,
+    /// A path, kept to one line.
+    path: bool,
+}
+
 enum Entry {
     Heading(HWND, &'static str),
     Row {
         label: HWND,
         text: &'static str,
-        sub: Option<(HWND, &'static str)>,
-        control: HWND,
-        /// The control is a combo box; its window height includes the list.
-        drop_rows: Option<usize>,
+        sub: Option<Sub>,
+        control: Control,
     },
 }
 
@@ -68,7 +111,12 @@ pub(super) struct Prefs {
     pub hwnd: HWND,
     entries: Vec<Entry>,
     combos: Vec<Combo>,
-    check: HWND,
+    /// The check boxes: ID, setting and window.
+    checks: Vec<(u16, &'static str, HWND)>,
+    /// The editor font button, and the notes folder's path and reset button.
+    font_button: HWND,
+    folder_path: HWND,
+    folder_reset: HWND,
     /// Normal and bold message fonts.
     fonts: Cell<[HFONT; 2]>,
     /// Window background and field (list) background.
@@ -92,7 +140,15 @@ enum Spec {
     Check {
         label: &'static str,
         sub: &'static str,
+        key: &'static str,
         on: bool,
+    },
+    /// Push buttons: ID, text and whether each is enabled. A subtitle here
+    /// is a path.
+    Buttons {
+        label: &'static str,
+        path: Option<String>,
+        buttons: Vec<(u16, String, bool)>,
     },
 }
 
@@ -100,8 +156,18 @@ fn pair(value: &str, text: &str) -> (String, String) {
     (value.to_string(), text.to_string())
 }
 
-/// The rows, from the settings as they are now.
-fn specs(settings: &Settings, paper: Paper) -> Vec<Spec> {
+/// The editor font button's text, such as "Consolas 11".
+fn font_text(settings: &Settings) -> String {
+    format!("{} {}", settings.font_face(), settings.font_size())
+}
+
+/// Whether `dir` is the default notes folder.
+fn is_default_dir(dir: &Path) -> bool {
+    notes::default_dir().is_some_and(|d| notes::same_dir(&d, dir))
+}
+
+/// The rows, from the settings as they are now; `dir` is the notes folder.
+fn specs(settings: &Settings, paper: Paper, dir: &Path) -> Vec<Spec> {
     let scheme = match settings.color_scheme() {
         settings::ColorScheme::System => "system",
         settings::ColorScheme::Light => "light",
@@ -115,6 +181,21 @@ fn specs(settings: &Settings, paper: Paper) -> Vec<Spec> {
     };
     vec![
         Spec::Heading("Appearance"),
+        Spec::Buttons {
+            label: "Editor font",
+            path: None,
+            buttons: vec![(ID_FONT, font_text(settings), true)],
+        },
+        Spec::Choice {
+            label: "Line spacing",
+            sub: None,
+            key: "line_spacing",
+            items: settings::LINE_SPACINGS
+                .iter()
+                .map(|(v, _)| pair(v, v))
+                .collect(),
+            current: settings.line_spacing().to_string(),
+        },
         Spec::Choice {
             label: "Colour scheme",
             sub: None,
@@ -195,7 +276,27 @@ fn specs(settings: &Settings, paper: Paper) -> Vec<Spec> {
         Spec::Check {
             label: "Confirm before deleting",
             sub: "Ask for confirmation when deleting a note",
+            key: "confirm_delete",
             on: settings.confirm_delete(),
+        },
+        Spec::Check {
+            label: "Show command confirmations",
+            sub: "Display a small confirmation message when you use a text manipulation command",
+            key: "command_toasts",
+            on: settings.command_toasts(),
+        },
+        Spec::Heading("Storage"),
+        Spec::Buttons {
+            label: "Notes folder",
+            path: Some(dir.display().to_string()),
+            buttons: vec![
+                (ID_FOLDER_CHANGE, "Change\u{2026}".to_string(), true),
+                (
+                    ID_FOLDER_RESET,
+                    "Reset to default".to_string(),
+                    !is_default_dir(dir),
+                ),
+            ],
         },
     ]
 }
@@ -274,13 +375,16 @@ impl Prefs {
             hwnd,
             entries: Vec::new(),
             combos: Vec::new(),
-            check: HWND::default(),
+            checks: Vec::new(),
+            font_button: HWND::default(),
+            folder_path: HWND::default(),
+            folder_reset: HWND::default(),
             fonts: Cell::new([HFONT::default(); 2]),
             brushes: Cell::new([HBRUSH::default(); 2]),
             dpi: Cell::new(96),
             focus: Cell::new(HWND::default()),
         };
-        let built = prefs.build(app.instance, &specs(&settings, paper));
+        let built = prefs.build(app.instance, &specs(&settings, paper, &app.dir()));
         if let Err(e) = built {
             // SAFETY: our own window.
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -308,7 +412,7 @@ impl Prefs {
                     current,
                 } => {
                     id += 1;
-                    let (label_hwnd, sub) = self.label(instance, label, *sub)?;
+                    let (label_hwnd, sub) = self.label(instance, label, *sub, false)?;
                     let style = tab | (CBS_DROPDOWNLIST as u32) | WS_VSCROLL.0;
                     let combo = child(self.hwnd, instance, w!("COMBOBOX"), "", style, id)?;
                     for (_, text) in items {
@@ -338,35 +442,63 @@ impl Prefs {
                         label: label_hwnd,
                         text: label,
                         sub,
-                        control: combo,
-                        drop_rows: Some(items.len()),
+                        control: Control::Combo(combo, items.len()),
                     });
                 }
-                Spec::Check { label, sub, on } => {
-                    let (label_hwnd, sub) = self.label(instance, label, Some(sub))?;
+                Spec::Check {
+                    label,
+                    sub,
+                    key,
+                    on,
+                } => {
+                    let (label_hwnd, sub) = self.label(instance, label, Some(sub), false)?;
                     // The label is its own control, so the check box has no
                     // text, which would be drawn in the wrong colour in the
                     // dark theme.
                     let style = tab | (BS_AUTOCHECKBOX as u32);
-                    let check = child(
-                        self.hwnd,
-                        instance,
-                        w!("BUTTON"),
-                        "",
-                        style,
-                        ID_CONFIRM_DELETE,
-                    )?;
+                    let id = ID_FIRST_CHECK + self.checks.len() as u16;
+                    let check = child(self.hwnd, instance, w!("BUTTON"), "", style, id)?;
                     // SAFETY: no pointers.
                     unsafe {
                         SendMessageW(check, BM_SETCHECK, Some(WPARAM(usize::from(*on))), None);
                     }
-                    self.check = check;
+                    self.checks.push((id, key, check));
                     self.entries.push(Entry::Row {
                         label: label_hwnd,
                         text: label,
                         sub,
-                        control: check,
-                        drop_rows: None,
+                        control: Control::Check(check),
+                    });
+                }
+                Spec::Buttons {
+                    label,
+                    path,
+                    buttons,
+                } => {
+                    let (label_hwnd, sub) = self.label(instance, label, path.as_deref(), true)?;
+                    let style = tab | (BS_PUSHBUTTON as u32);
+                    let mut hwnds = Vec::new();
+                    for (id, text, enabled) in buttons {
+                        let button = child(self.hwnd, instance, w!("BUTTON"), text, style, *id)?;
+                        // SAFETY: plain call on the button just made.
+                        let _ = unsafe { EnableWindow(button, *enabled) };
+                        match *id {
+                            ID_FONT => self.font_button = button,
+                            ID_FOLDER_RESET => self.folder_reset = button,
+                            _ => {}
+                        }
+                        hwnds.push(button);
+                    }
+                    if path.is_some()
+                        && let Some(sub) = &sub
+                    {
+                        self.folder_path = sub.hwnd;
+                    }
+                    self.entries.push(Entry::Row {
+                        label: label_hwnd,
+                        text: label,
+                        sub,
+                        control: Control::Buttons(hwnds),
                     });
                 }
             }
@@ -374,20 +506,28 @@ impl Prefs {
         Ok(())
     }
 
-    /// The label control of a row, and its subtitle.
+    /// The label control of a row, and its subtitle. A `path` subtitle is
+    /// kept to one line, shortened in the middle if it does not fit.
     fn label(
         &self,
         instance: HINSTANCE,
         label: &'static str,
-        sub: Option<&'static str>,
-    ) -> windows::core::Result<(HWND, Option<(HWND, &'static str)>)> {
+        sub: Option<&str>,
+        path: bool,
+    ) -> windows::core::Result<(HWND, Option<Sub>)> {
         let statics = SS_NOPREFIX;
         let label_hwnd = child(self.hwnd, instance, w!("STATIC"), label, statics, 0)?;
+        let sub_style = if path {
+            statics | SS_LEFTNOWORDWRAP | SS_PATHELLIPSIS
+        } else {
+            statics
+        };
         let sub = match sub {
-            Some(text) => Some((
-                child(self.hwnd, instance, w!("STATIC"), text, statics, 0)?,
-                text,
-            )),
+            Some(text) => Some(Sub {
+                hwnd: child(self.hwnd, instance, w!("STATIC"), text, sub_style, 0)?,
+                text: text.to_string(),
+                path,
+            }),
             None => None,
         };
         Ok((label_hwnd, sub))
@@ -421,28 +561,31 @@ impl Prefs {
                     label,
                     sub,
                     control,
-                    drop_rows,
                     ..
                 } => {
                     set_font(*label, fonts[0]);
-                    if let Some((sub, _)) = sub {
-                        set_font(*sub, fonts[0]);
+                    if let Some(sub) = sub {
+                        set_font(sub.hwnd, fonts[0]);
                     }
-                    set_font(*control, fonts[0]);
+                    for hwnd in control.windows() {
+                        set_font(*hwnd, fonts[0]);
+                    }
                     // SAFETY: static strings; live windows.
                     unsafe {
-                        if drop_rows.is_some() {
-                            let _ = SetWindowTheme(*control, combos, PCWSTR::null());
+                        if let Control::Combo(combo, _) = control {
+                            let _ = SetWindowTheme(*combo, combos, PCWSTR::null());
                             // The drop down list's scroll bar.
                             let mut info = COMBOBOXINFO {
                                 cbSize: size_of::<COMBOBOXINFO>() as u32,
                                 ..Default::default()
                             };
-                            if GetComboBoxInfo(*control, &mut info).is_ok() {
+                            if GetComboBoxInfo(*combo, &mut info).is_ok() {
                                 let _ = SetWindowTheme(info.hwndList, buttons, PCWSTR::null());
                             }
                         } else {
-                            let _ = SetWindowTheme(*control, buttons, PCWSTR::null());
+                            for hwnd in control.windows() {
+                                let _ = SetWindowTheme(*hwnd, buttons, PCWSTR::null());
+                            }
                         }
                     }
                 }
@@ -493,49 +636,78 @@ impl Prefs {
                         text,
                         sub,
                         control,
-                        drop_rows,
                     } => {
                         let label_height = dialog::text_height(hdc, normal, text, text_width);
-                        let sub_height = sub.map_or(0, |(_, text)| {
+                        let sub_height = sub.as_ref().map_or(0, |sub| {
+                            // A path is one line, whatever its length.
+                            let text = if sub.path { "X" } else { sub.text.as_str() };
                             s(2) + dialog::text_height(hdc, normal, text, text_width)
                         });
                         let block = label_height + sub_height;
                         // A combo box's height includes its list; it keeps
                         // only the closed part for itself.
-                        let control_height = match drop_rows {
-                            Some(rows) => {
-                                let dropped = s(COMBO_HEIGHT) + s(DROP_ROW) * *rows as i32 + s(4);
+                        let dropped =
+                            |rows: usize| s(COMBO_HEIGHT) + s(DROP_ROW) * rows as i32 + s(4);
+                        let control_height = match control {
+                            Control::Combo(combo, rows) => {
                                 let _ = MoveWindow(
-                                    *control,
+                                    *combo,
                                     control_x,
                                     y,
                                     control_width,
-                                    dropped,
+                                    dropped(*rows),
                                     true,
                                 );
                                 let mut rc = RECT::default();
-                                let _ = GetWindowRect(*control, &mut rc);
+                                let _ = GetWindowRect(*combo, &mut rc);
                                 (rc.bottom - rc.top).max(s(COMBO_HEIGHT))
                             }
-                            None => s(CHECK_SIZE),
+                            Control::Check(_) => s(CHECK_SIZE),
+                            Control::Buttons(_) => s(BUTTON_HEIGHT),
                         };
                         let row = block.max(control_height);
                         let label_y = y + (row - block) / 2;
                         let _ = MoveWindow(*label, margin, label_y, text_width, label_height, true);
-                        if let Some((sub, _)) = sub {
+                        if let Some(sub) = sub {
                             let sub_y = label_y + label_height + s(2);
                             let sub_height = sub_height - s(2);
-                            let _ = MoveWindow(*sub, margin, sub_y, text_width, sub_height, true);
+                            let _ =
+                                MoveWindow(sub.hwnd, margin, sub_y, text_width, sub_height, true);
                         }
                         let control_y = y + (row - control_height) / 2;
-                        let (w, h) = match drop_rows {
-                            Some(rows) => (
-                                control_width,
-                                s(COMBO_HEIGHT) + s(DROP_ROW) * *rows as i32 + s(4),
-                            ),
-                            None => (s(CHECK_SIZE), control_height),
-                        };
-                        let _ = MoveWindow(*control, control_x, control_y, w, h, true);
+                        match control {
+                            Control::Combo(combo, rows) => {
+                                let h = dropped(*rows);
+                                let _ = MoveWindow(
+                                    *combo,
+                                    control_x,
+                                    control_y,
+                                    control_width,
+                                    h,
+                                    true,
+                                );
+                            }
+                            Control::Check(check) => {
+                                let size = s(CHECK_SIZE);
+                                let _ = MoveWindow(*check, control_x, control_y, size, size, true);
+                            }
+                            Control::Buttons(buttons) => {
+                                let n = buttons.len().max(1) as i32;
+                                let gap = s(BUTTON_GAP);
+                                let width = (control_width - gap * (n - 1)) / n;
+                                for (i, button) in buttons.iter().enumerate() {
+                                    let x = control_x + (width + gap) * i as i32;
+                                    let _ = MoveWindow(
+                                        *button,
+                                        x,
+                                        control_y,
+                                        width,
+                                        control_height,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
                         y += row + s(ROW_GAP);
                     }
                 }
@@ -549,7 +721,13 @@ impl Prefs {
     }
 
     fn first_control(&self) -> HWND {
-        self.combos.first().map_or(self.hwnd, |c| c.hwnd)
+        self.entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Row { control, .. } => control.windows().first().copied(),
+                Entry::Heading(..) => None,
+            })
+            .unwrap_or(self.hwnd)
     }
 }
 
@@ -647,8 +825,81 @@ impl App {
                 self.save_setting(key, value);
                 self.scope_changed();
             }
+            "line_spacing" => {
+                self.save_setting(key, value);
+                self.refont();
+            }
             // The other choices are read when Whisp starts.
             _ => self.save_setting(key, value),
+        }
+    }
+
+    /// The editor font button: picks a face and size in the system font
+    /// dialog, then applies and saves them.
+    fn choose_font(&self) {
+        let Some(owner) = self.prefs.borrow().as_ref().map(|p| p.hwnd) else {
+            return;
+        };
+        let (face, size) = {
+            let settings = self.settings.borrow();
+            (settings.font_face().to_string(), settings.font_size())
+        };
+        let Some((face, size)) = font_dialog(owner, &face, size) else {
+            return;
+        };
+        self.save_setting("font_face", &face);
+        self.save_setting("font_size", &size.to_string());
+        self.refont();
+        if let Some(prefs) = self.prefs.borrow().as_ref() {
+            let text = HSTRING::from(font_text(&self.settings.borrow()));
+            // SAFETY: `text` outlives the call.
+            let _ = unsafe { SetWindowTextW(prefs.font_button, &text) };
+        }
+    }
+
+    /// "Change…": picks a folder and moves the notes there.
+    fn choose_notes_dir(&self) {
+        let Some(owner) = self.prefs.borrow().as_ref().map(|p| p.hwnd) else {
+            return;
+        };
+        let dir = self.dir();
+        let Some(new) = actions::folder_dialog(owner, &dir) else {
+            return;
+        };
+        if notes::same_dir(&new, &dir) {
+            return;
+        }
+        let Some(value) = new.to_str() else {
+            self.show_status("Whisp cannot use that folder");
+            return;
+        };
+        // Choosing the default folder is the same as resetting to it.
+        let setting = if is_default_dir(&new) { "" } else { value };
+        self.move_notes(&new, setting);
+        self.sync_folder_row();
+    }
+
+    /// "Reset to default": moves the notes back to the default folder.
+    fn reset_notes_dir(&self) {
+        let Some(default) = notes::default_dir() else {
+            return;
+        };
+        self.move_notes(&default, "");
+        self.sync_folder_row();
+    }
+
+    /// The notes folder row shows the folder in use.
+    fn sync_folder_row(&self) {
+        let guard = self.prefs.borrow();
+        let Some(prefs) = guard.as_ref() else {
+            return;
+        };
+        let dir = self.dir();
+        let text = HSTRING::from(dir.display().to_string());
+        // SAFETY: `text` outlives the call; plain calls on live windows.
+        unsafe {
+            let _ = SetWindowTextW(prefs.folder_path, &text);
+            let _ = EnableWindow(prefs.folder_reset, !is_default_dir(&dir));
         }
     }
 
@@ -759,22 +1010,31 @@ impl App {
                         let value = combo.values.get(usize::try_from(sel.0).ok()?)?;
                         Some((combo.key, value.clone()))
                     })
-                } else if code == BN_CLICKED && id == ID_CONFIRM_DELETE {
-                    // SAFETY: no pointers.
-                    let on = unsafe { SendMessageW(prefs.check, BM_GETCHECK, None, None) };
-                    Some((
-                        "confirm_delete",
-                        if on.0 != 0 { "1" } else { "0" }.to_string(),
-                    ))
+                } else if code == BN_CLICKED {
+                    prefs
+                        .checks
+                        .iter()
+                        .find(|c| c.0 == id)
+                        .map(|&(_, key, check)| {
+                            // SAFETY: no pointers.
+                            let on = unsafe { SendMessageW(check, BM_GETCHECK, None, None) };
+                            (key, if on.0 != 0 { "1" } else { "0" }.to_string())
+                        })
                 } else {
                     None
                 };
-                let cancel = id == IDCANCEL.0 as u16 && code == BN_CLICKED;
+                let clicked = (code == BN_CLICKED).then_some(id);
                 drop(guard);
                 if let Some((key, value)) = change {
                     self.apply_choice(key, &value);
-                } else if cancel {
-                    self.close_prefs();
+                } else {
+                    match clicked {
+                        Some(ID_FONT) => self.choose_font(),
+                        Some(ID_FOLDER_CHANGE) => self.choose_notes_dir(),
+                        Some(ID_FOLDER_RESET) => self.reset_notes_dir(),
+                        Some(id) if id == IDCANCEL.0 as u16 => self.close_prefs(),
+                        _ => {}
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -829,7 +1089,7 @@ impl Prefs {
         let dim = self
             .entries
             .iter()
-            .any(|e| matches!(e, Entry::Row { sub: Some((h, _)), .. } if *h == control));
+            .any(|e| matches!(e, Entry::Row { sub: Some(sub), .. } if sub.hwnd == control));
         let field_color = if theme.dark {
             theme.code_background
         } else {
@@ -841,5 +1101,60 @@ impl Prefs {
             SetBkColor(hdc, if list { field_color } else { theme.background });
         }
         LRESULT(if list { field } else { background }.0 as isize)
+    }
+}
+
+type ChooseFont = unsafe extern "system" fn(*mut CHOOSEFONTW) -> BOOL;
+
+/// Shows the system font dialog, starting at `face` in `size` points; the
+/// face and whole point size chosen, or `None` when cancelled. Weight and
+/// style are ignored, as in Whisp. comdlg32.dll is loaded on first use
+/// rather than at startup.
+fn font_dialog(owner: HWND, face: &str, size: u32) -> Option<(String, u32)> {
+    let sizes = settings::FONT_SIZES;
+    // SAFETY: loading a system DLL and calling ChooseFontW with its
+    // signature; `font` and `choose` outlive the call, and the screen DC is
+    // released after use.
+    unsafe {
+        let module = LoadLibraryW(w!("comdlg32.dll")).ok()?;
+        let function: ChooseFont = std::mem::transmute(GetProcAddress(module, s!("ChooseFontW"))?);
+        // The dialog turns the height into points with the screen's DPI.
+        let hdc = GetDC(None);
+        let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSY).max(1);
+        ReleaseDC(None, hdc);
+        let mut font = LOGFONTW {
+            lfHeight: -((size as i32 * dpi + 36) / 72),
+            ..Default::default()
+        };
+        let room = font.lfFaceName.len() - 1;
+        for (dst, src) in font.lfFaceName[..room].iter_mut().zip(face.encode_utf16()) {
+            *dst = src;
+        }
+        let mut choose = CHOOSEFONTW {
+            lStructSize: size_of::<CHOOSEFONTW>() as u32,
+            hwndOwner: owner,
+            lpLogFont: &mut font,
+            Flags: CF_SCREENFONTS
+                | CF_INITTOLOGFONTSTRUCT
+                | CF_NOVERTFONTS
+                | CF_FORCEFONTEXIST
+                | CF_LIMITSIZE,
+            nSizeMin: *sizes.start() as i32,
+            nSizeMax: *sizes.end() as i32,
+            ..Default::default()
+        };
+        if !function(&mut choose).as_bool() {
+            return None;
+        }
+        let len = font
+            .lfFaceName
+            .iter()
+            .position(|&u| u == 0)
+            .unwrap_or(font.lfFaceName.len());
+        let face = String::from_utf16_lossy(&font.lfFaceName[..len]);
+        // In tenths of a point; rounded to whole points.
+        let points = ((choose.iPointSize.max(0) + 5) / 10) as u32;
+        let points = points.clamp(*sizes.start(), *sizes.end());
+        (!face.is_empty()).then_some((face, points))
     }
 }
