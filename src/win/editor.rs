@@ -9,14 +9,16 @@ use windows::Win32::Foundation::{COLORREF, HGLOBAL, HINSTANCE, HWND, LPARAM, POI
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::{
     EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETREADONLY, EM_SETRECT, SetWindowTheme,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
+use windows::core::{GUID, HSTRING, IUnknown, Interface, PCWSTR, s, w};
 
+use super::canvas;
 use super::theme::Theme;
 use crate::lines::{self, Line};
 use crate::{markdown, notes, rtf};
@@ -89,7 +91,9 @@ impl Editor {
                 None
             } else {
                 // EM_GETOLEINTERFACE hands over a reference to IRichEditOle.
-                IUnknown::from_raw(ole).cast::<ITextDocument>().ok()
+                let ole = IUnknown::from_raw(ole);
+                canvas::attach(hwnd, text_services(&ole));
+                ole.cast::<ITextDocument>().ok()
             };
             Ok(Editor {
                 hwnd,
@@ -430,6 +434,20 @@ impl Editor {
         text.push(0);
         // SAFETY: `text` is NUL terminated and outlives the call.
         unsafe { send(self.hwnd, EM_REPLACESEL, 1, text.as_ptr() as isize) };
+    }
+}
+
+/// The control's ITextServices, which draws it. Msftedit's interface ID
+/// differs from older RichEdit versions, so it is read from the DLL.
+fn text_services(ole: &IUnknown) -> Option<ITextServices> {
+    // SAFETY: the export is a GUID in Msftedit.dll, which stays loaded; the
+    // pointer QueryInterface returns is an owned reference.
+    unsafe {
+        let module = GetModuleHandleW(w!("Msftedit.dll")).ok()?;
+        let iid = GetProcAddress(module, s!("IID_ITextServices"))? as usize as *const GUID;
+        let mut raw = std::ptr::null_mut();
+        ole.query(iid, &mut raw).ok().ok()?;
+        Some(ITextServices::from_raw(raw))
     }
 }
 

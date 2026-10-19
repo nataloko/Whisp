@@ -10,8 +10,10 @@ mod lines;
 mod markdown;
 mod notes;
 mod ocr_text;
+mod paper;
 mod rtf;
 mod search;
+mod settings;
 #[cfg(windows)]
 mod win;
 

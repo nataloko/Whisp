@@ -1,5 +1,6 @@
 //! The main window: note navigation, saving, theme, DPI and shortcuts.
 
+mod canvas;
 mod editor;
 mod ocr;
 mod search_ui;
@@ -14,6 +15,7 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, HDC};
+use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::*;
@@ -23,7 +25,9 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::gesture::Side;
 use crate::notes;
+use crate::paper::Paper;
 use crate::search::{Index, Row};
+use crate::settings::{self, Settings};
 use editor::Editor;
 use ocr::WM_OCR_DONE;
 use search_ui::{Panel, TIMER_SEARCH, WM_SEARCH_OPEN};
@@ -37,6 +41,7 @@ const SAVE_RETRY_MS: u32 = 2000;
 /// Clears a passing status message from the title.
 const TIMER_STATUS: usize = 4;
 const STATUS_MS: u32 = 3000;
+const PAPER_STATUS_MS: u32 = 2000;
 /// Posted after a change, so restyling runs once RichEdit has finished
 /// handling the keystroke.
 const WM_RESTYLE: u32 = WM_APP + 1;
@@ -93,6 +98,10 @@ struct App {
     search_rows: RefCell<Vec<Row>>,
     /// All notes for searching, cached by modified time.
     index: RefCell<Index>,
+    paper: Cell<Paper>,
+    /// Where `settings` lives; None without LOCALAPPDATA.
+    settings_dir: Option<PathBuf>,
+    settings: RefCell<Settings>,
 }
 
 thread_local! {
@@ -213,6 +222,11 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
         }
         let editor = Editor::create(hwnd, instance, true)?;
 
+        let settings_dir = settings::dir();
+        let settings = settings_dir
+            .as_deref()
+            .map_or_else(Settings::default, Settings::load);
+        let paper = Paper::parse(settings.get("paper").unwrap_or(""));
         let current = list.len().saturating_sub(1);
         let app: &'static App = Box::leak(Box::new(App {
             hwnd,
@@ -239,11 +253,15 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             search_open: Cell::new(false),
             search_rows: RefCell::new(Vec::new()),
             index: RefCell::new(Index::default()),
+            paper: Cell::new(paper),
+            settings_dir,
+            settings: RefCell::new(settings),
         }));
         APP.with(|a| a.set(app).ok());
 
         app.theme.get().apply_to_frame(hwnd);
         app.editor().apply_theme(&app.theme.get());
+        canvas::set(paper, &app.theme.get());
         app.layout();
         app.show(current);
         let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -429,6 +447,7 @@ impl App {
             let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
             let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, flags);
         }
+        canvas::set(self.paper.get(), &theme);
         self.restyle();
         self.style_search();
     }
@@ -608,11 +627,19 @@ impl App {
 
     /// Handles a key before RichEdit sees it; returns true if it was used.
     fn shortcut(&self, msg: &MSG) -> bool {
+        // SAFETY: plain calls.
+        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        // Alt+P, without Ctrl so AltGr typing is left alone: the next paper.
+        if msg.message == WM_SYSKEYDOWN
+            && VIRTUAL_KEY(msg.wParam.0 as u16) == VK_P
+            && !down(VK_CONTROL)
+        {
+            self.next_paper();
+            return true;
+        }
         if msg.message != WM_KEYDOWN {
             return false;
         }
-        // SAFETY: plain calls.
-        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
         // Ctrl+Alt is AltGr on many layouts, which types characters.
         if down(VK_MENU) {
             return false;
@@ -693,10 +720,35 @@ impl App {
 
     /// Shows `message` in the title for a few seconds.
     fn show_status(&self, message: &'static str) {
+        self.show_status_for(message, STATUS_MS);
+    }
+
+    fn show_status_for(&self, message: &'static str, ms: u32) {
         self.status.replace(Some(message));
         self.update_title();
         // SAFETY: a timer on our own window; restarting it resets its delay.
-        unsafe { SetTimer(Some(self.hwnd), TIMER_STATUS, STATUS_MS, None) };
+        unsafe { SetTimer(Some(self.hwnd), TIMER_STATUS, ms, None) };
+    }
+
+    /// Alt+P: blank, dotted, grid, large grid, and round again.
+    fn next_paper(&self) {
+        let paper = self.paper.get().next();
+        self.paper.set(paper);
+        canvas::set(paper, &self.theme.get());
+        if let Some(dir) = &self.settings_dir {
+            let mut settings = self.settings.borrow_mut();
+            settings.set("paper", paper.name());
+            let _ = settings.save(dir);
+        }
+        // SAFETY: the string outlives the call.
+        unsafe { OutputDebugStringW(&HSTRING::from(format!("whisp: paper {}\n", paper.name()))) };
+        let message = match paper {
+            Paper::Blank => "Paper: blank",
+            Paper::Dotted => "Paper: dotted",
+            Paper::Grid => "Paper: grid",
+            Paper::LargeGrid => "Paper: large grid",
+        };
+        self.show_status_for(message, PAPER_STATUS_MS);
     }
 }
 
