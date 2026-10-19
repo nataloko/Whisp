@@ -24,6 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::gesture::Side;
+use crate::lists;
 use crate::notes;
 use crate::paper::Paper;
 use crate::search::{Index, Row};
@@ -82,6 +83,9 @@ struct App {
     busy: Cell<bool>,
     /// A WM_RESTYLE is posted and not handled yet.
     restyle_posted: Cell<bool>,
+    /// Ctrl+Z or Ctrl+Y was pressed: the next restyle does not turn
+    /// `- [ ]` into `☐`, or undoing that conversion would redo it at once.
+    undoing: Cell<bool>,
     theme: Cell<Theme>,
     dpi: Cell<u32>,
     /// Changes whenever a different note is shown, so text read from an
@@ -243,6 +247,7 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             save_failed: Cell::new(false),
             busy: Cell::new(false),
             restyle_posted: Cell::new(false),
+            undoing: Cell::new(false),
             pacer: RefCell::new(None),
             theme: Cell::new(Theme::current()),
             dpi: Cell::new(dpi),
@@ -359,9 +364,14 @@ impl App {
             }
             WM_RESTYLE => {
                 self.restyle_posted.set(false);
+                let convert = !self.undoing.replace(false);
                 self.busy.set(true);
-                self.editor().restyle_changes(&self.theme.get());
+                let converted = self.editor().restyle_changes(&self.theme.get(), convert);
                 self.busy.set(false);
+                if converted {
+                    // A text change: saved and restyled like typing.
+                    self.changed();
+                }
             }
             WM_DPICHANGED => {
                 self.dpi.set((wparam.0 & 0xffff) as u32);
@@ -637,6 +647,17 @@ impl App {
             self.next_paper();
             return true;
         }
+        // Alt+Up and Alt+Down, again without Ctrl: move the line.
+        if msg.message == WM_SYSKEYDOWN && !down(VK_CONTROL) {
+            let up = match VIRTUAL_KEY(msg.wParam.0 as u16) {
+                VK_UP => true,
+                VK_DOWN => false,
+                _ => return false,
+            };
+            self.editor()
+                .list_action(|lines, caret| lists::move_line(lines, caret, up), false);
+            return true;
+        }
         if msg.message != WM_KEYDOWN {
             return false;
         }
@@ -647,11 +668,20 @@ impl App {
         let key = VIRTUAL_KEY(msg.wParam.0 as u16);
         let shift = down(VK_SHIFT);
         if !down(VK_CONTROL) {
-            if shift && key == VK_INSERT {
-                self.paste();
-                return true;
+            match key {
+                VK_INSERT if shift => self.paste(),
+                // Enter continues lists; elsewhere it stays RichEdit's.
+                VK_RETURN if !shift => return self.editor().list_action(lists::enter, true),
+                // Tab always indents the line, as in Whisp, never typing a tab.
+                VK_TAB if shift => {
+                    self.editor().list_action(lists::shift_tab, false);
+                }
+                VK_TAB => {
+                    self.editor().list_action(lists::tab, false);
+                }
+                _ => return false,
             }
-            return false;
+            return true;
         }
         match key {
             // RichEdit uses these two for font size.
@@ -660,8 +690,19 @@ impl App {
             VK_N => self.go(Nav::Last),
             VK_F => self.open_search(),
             VK_V => self.paste(),
+            VK_S => {
+                self.editor().list_action(lists::toggle_checkbox, false);
+            }
+            // Ctrl+Tab outdents, as in Whisp.
+            VK_TAB => {
+                self.editor().list_action(lists::shift_tab, false);
+            }
             VK_A if !shift => return false,
-            VK_C | VK_X | VK_Z | VK_Y => return false,
+            VK_Z | VK_Y => {
+                self.undoing.set(true);
+                return false;
+            }
+            VK_C | VK_X => return false,
             // Any other Ctrl + letter, digit or punctuation key is a RichEdit
             // formatting shortcut (bold, alignment, line spacing, font size...).
             _ => return is_character_key(key),

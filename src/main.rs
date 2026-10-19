@@ -7,6 +7,7 @@
 mod dib;
 mod gesture;
 mod lines;
+mod lists;
 mod markdown;
 mod notes;
 mod ocr_text;

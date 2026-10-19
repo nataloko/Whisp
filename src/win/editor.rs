@@ -21,6 +21,7 @@ use windows::core::{GUID, HSTRING, IUnknown, Interface, PCWSTR, s, w};
 use super::canvas;
 use super::theme::Theme;
 use crate::lines::{self, Line};
+use crate::lists;
 use crate::{markdown, notes, rtf};
 
 const CF_UNICODETEXT: u32 = 13;
@@ -270,13 +271,29 @@ impl Editor {
     /// Restyles the lines whose text or styles changed since they were last
     /// styled, without moving the selection. Formatting stays out of the
     /// undo stack and sends no change notifications.
-    pub fn restyle_changes(&self, theme: &Theme) {
+    ///
+    /// First, with `convert`, `- [ ]` and `- [x]` typed at the start of an
+    /// edited line become `☐` and `☑`. That is a text change of its own:
+    /// it returns true without restyling, and the caller treats it as an
+    /// edit, which restyles again.
+    pub fn restyle_changes(&self, theme: &Theme, convert: bool) -> bool {
         let started = Instant::now();
         let units = self.text_utf16();
-        let spans = markdown::highlight(&String::from_utf16_lossy(&units));
+        let text = String::from_utf16_lossy(&units);
+        let spans = markdown::highlight(&text);
         let lines = lines::lines(&units, &spans);
         let signatures: Vec<u64> = lines.iter().map(|l| l.signature).collect();
         let changed = lines::changed(&self.styled.borrow(), &signatures);
+        if convert && !changed.is_empty() {
+            // One unit per break either way, so offsets stay the same.
+            let text = notes::to_lf(&text);
+            let text_lines: Vec<&str> = text.split('\n').collect();
+            let caret = lists::position16(&text_lines, self.selection().0);
+            if let Some(edit) = lists::convert_checkboxes(&text_lines, changed.clone(), caret) {
+                self.apply_edit(&text_lines, &edit);
+                return true;
+            }
+        }
         let runs = self.style_lines(&lines[changed.clone()], &look(theme));
         *self.styled.borrow_mut() = signatures;
         let report = format!(
@@ -286,6 +303,53 @@ impl Editor {
         );
         // SAFETY: `report` outlives the call.
         unsafe { OutputDebugStringW(&HSTRING::from(report)) };
+        false
+    }
+
+    /// The selection as UTF-16 offsets, start first.
+    fn selection(&self) -> (usize, usize) {
+        let mut range = CHARRANGE::default();
+        // SAFETY: `range` outlives the call.
+        unsafe { send(self.hwnd, EM_EXGETSEL, 0, &mut range as *mut _ as isize) };
+        (range.cpMin.max(0) as usize, range.cpMax.max(0) as usize)
+    }
+
+    /// Runs a list action (see `lists`) at the caret, or at the start of
+    /// the selection, and applies its edit as one undo step. With
+    /// `collapsed`, a selection leaves the key to RichEdit. Returns whether
+    /// the action made an edit.
+    pub fn list_action(
+        &self,
+        action: impl FnOnce(&[&str], (usize, usize)) -> Option<lists::Edit>,
+        collapsed: bool,
+    ) -> bool {
+        let (start, end) = self.selection();
+        if collapsed && start != end {
+            return false;
+        }
+        let text = self.text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        let Some(edit) = action(&lines, lists::position16(&lines, start)) else {
+            return false;
+        };
+        self.apply_edit(&lines, &edit);
+        true
+    }
+
+    /// Replaces the edit's range with one EM_REPLACESEL, then places the
+    /// caret.
+    fn apply_edit(&self, lines: &[&str], edit: &lists::Edit) {
+        let range = CHARRANGE {
+            cpMin: lists::offset16(lines, edit.start) as i32,
+            cpMax: lists::offset16(lines, edit.end) as i32,
+        };
+        // SAFETY: `range` outlives the call.
+        unsafe { send(self.hwnd, EM_EXSETSEL, 0, &range as *const _ as isize) };
+        self.replace_plain(&edit.text);
+        let text = self.text();
+        let after: Vec<&str> = text.split('\n').collect();
+        let caret = lists::offset16(&after, edit.caret);
+        self.select(caret, caret);
     }
 
     /// Restyles everything after a theme or DPI change by reloading the text
@@ -415,9 +479,18 @@ impl Editor {
                 }
             })
             .collect();
-        if units.is_empty() {
-            return;
+        if !units.is_empty() {
+            self.replace_units(&units);
         }
+    }
+
+    /// Replaces the selection with `text`, even when it is empty.
+    fn replace_plain(&self, text: &str) {
+        let units: Vec<u16> = to_cr(text).into_iter().filter(|&u| u != 0).collect();
+        self.replace_units(&units);
+    }
+
+    fn replace_units(&self, units: &[u16]) {
         // RichEdit reads a string starting with "{\rtf" as RTF, so such text
         // goes in as two pieces.
         let rtf: Vec<u16> = r"{\rtf".encode_utf16().collect();
@@ -425,7 +498,7 @@ impl Editor {
             self.replace_selection(&units[..1]);
             self.replace_selection(&units[1..]);
         } else {
-            self.replace_selection(&units);
+            self.replace_selection(units);
         }
     }
 
