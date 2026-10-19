@@ -20,6 +20,7 @@ mod paper;
 mod rtf;
 mod search;
 mod settings;
+mod shortcuts;
 mod trash;
 #[cfg(windows)]
 mod win;

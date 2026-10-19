@@ -76,6 +76,20 @@ impl Settings {
         }
     }
 
+    /// The `color_scheme` setting.
+    pub fn color_scheme(&self) -> ColorScheme {
+        match self.get("color_scheme") {
+            Some("light") => ColorScheme::Light,
+            Some("dark") => ColorScheme::Dark,
+            _ => ColorScheme::System,
+        }
+    }
+
+    /// Whether deleting a note asks first (`confirm_delete=1`). Off by default.
+    pub fn confirm_delete(&self) -> bool {
+        self.get("confirm_delete") == Some("1")
+    }
+
     /// Sets `key`, replacing its line or adding one at the end.
     pub fn set(&mut self, key: &str, value: &str) {
         let line = format!("{key}={value}");
@@ -108,6 +122,45 @@ pub enum Startup {
     LastNote,
     /// The empty page.
     EmptyNote,
+}
+
+/// The `color_scheme` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorScheme {
+    /// Follow the system (the default).
+    System,
+    Light,
+    Dark,
+}
+
+/// The `archive_days` choices of the preferences: days and label.
+pub const ARCHIVE_CHOICES: [(u32, &str); 4] = [
+    (0, "Never"),
+    (7, "1 Week"),
+    (30, "1 Month"),
+    (365, "1 Year"),
+];
+
+/// The `max_carousel_size` choices of the preferences: notes and label.
+pub const CAROUSEL_CHOICES: [(u32, &str); 4] = [
+    (10, "10 Notes"),
+    (25, "25 Notes"),
+    (50, "50 Notes"),
+    (0, "Unlimited"),
+];
+
+/// `base` plus, when `value` is not one of them, `value` as an extra last
+/// choice labelled by `label`, so a number set by hand is not lost.
+pub fn with_stored(
+    base: &[(u32, &str)],
+    value: u32,
+    label: impl Fn(u32) -> String,
+) -> Vec<(u32, String)> {
+    let mut choices: Vec<_> = base.iter().map(|&(n, l)| (n, l.to_string())).collect();
+    if !base.iter().any(|&(n, _)| n == value) {
+        choices.push((value, label(value)));
+    }
+    choices
 }
 
 /// A window's normal (restored) rectangle and whether it is maximized, as
@@ -204,6 +257,34 @@ mod tests {
         let s = Settings::parse("archive_days=-1\nmax_carousel_size=x\nstartup=other");
         assert_eq!((s.archive_days(), s.max_carousel_size()), (0, 10));
         assert_eq!(s.startup(), Startup::LastNote);
+    }
+
+    #[test]
+    fn appearance_and_delete_settings() {
+        let s = Settings::default();
+        assert_eq!(s.color_scheme(), ColorScheme::System);
+        assert!(!s.confirm_delete());
+        let s = Settings::parse("color_scheme=dark\nconfirm_delete=1");
+        assert_eq!(s.color_scheme(), ColorScheme::Dark);
+        assert!(s.confirm_delete());
+        let s = Settings::parse("color_scheme=light\nconfirm_delete=0");
+        assert_eq!(s.color_scheme(), ColorScheme::Light);
+        assert!(!s.confirm_delete());
+        assert_eq!(
+            Settings::parse("color_scheme=blue").color_scheme(),
+            ColorScheme::System
+        );
+    }
+
+    #[test]
+    fn stored_numbers_become_extra_choices() {
+        let same = with_stored(&ARCHIVE_CHOICES, 30, |n| format!("{n} days"));
+        assert_eq!(same.len(), 4);
+        let extra = with_stored(&ARCHIVE_CHOICES, 90, |n| format!("{n} days"));
+        assert_eq!(extra.len(), 5);
+        assert_eq!(extra[4], (90, "90 days".to_string()));
+        let zero = with_stored(&CAROUSEL_CHOICES, 0, |n| format!("{n} Notes"));
+        assert_eq!(zero.len(), 4);
     }
 
     #[test]

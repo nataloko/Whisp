@@ -5,6 +5,8 @@ use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowA
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::core::{BOOL, w};
 
+use crate::settings::ColorScheme;
+
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
@@ -84,6 +86,26 @@ impl Theme {
         } else {
             LIGHT
         }
+    }
+
+    /// The theme for the `color_scheme` setting: the system's own for
+    /// `System`, so a system change is still followed.
+    pub fn for_scheme(scheme: ColorScheme) -> Theme {
+        match scheme {
+            ColorScheme::System => Theme::current(),
+            ColorScheme::Light => LIGHT,
+            ColorScheme::Dark => DARK,
+        }
+    }
+
+    /// The text colour for secondary text: 60% text over the background.
+    pub fn dim(&self) -> COLORREF {
+        let mix = |shift: u32| {
+            let t = (self.text.0 >> shift) & 0xff;
+            let b = (self.background.0 >> shift) & 0xff;
+            ((t * 6 + b * 4) / 10) << shift
+        };
+        COLORREF(mix(0) | mix(8) | mix(16))
     }
 
     /// Dark or light title bar.

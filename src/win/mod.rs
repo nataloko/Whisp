@@ -2,8 +2,11 @@
 
 mod actions;
 mod canvas;
+mod dialog;
 mod editor;
+mod keys_ui;
 mod ocr;
+mod prefs;
 mod search_ui;
 mod suggest;
 mod swipe;
@@ -24,6 +27,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Controls::{
+    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TaskDialogIndirect,
+};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -39,7 +46,9 @@ use crate::search::{Index, Row};
 use crate::settings::{self, Placement, Settings, Startup};
 use crate::trash;
 use editor::Editor;
+use keys_ui::KeysWindow;
 use ocr::WM_OCR_DONE;
+use prefs::Prefs;
 use search_ui::{Panel, TIMER_SEARCH, WM_SEARCH_OPEN};
 use suggest::{Popup, WM_SUGGEST};
 use swipe::{Pacer, SwipeState, WM_SWIPE_FRAME};
@@ -59,6 +68,8 @@ const PLACEMENT_DELAY_MS: u32 = 1000;
 /// Posted after a change, so restyling runs once RichEdit has finished
 /// handling the keystroke.
 const WM_RESTYLE: u32 = WM_APP + 1;
+/// The Delete button of the delete confirmation; above the standard IDs.
+const DELETE_BUTTON: i32 = 100;
 
 #[derive(Clone, Copy)]
 enum Nav {
@@ -135,6 +146,10 @@ struct App {
     /// Symbols are hidden on the empty page, in the per note scope, where
     /// there is no file to keep the flag for yet.
     hide_new: Cell<bool>,
+    /// The preferences window (Ctrl+,), while open.
+    prefs: RefCell<Option<Prefs>>,
+    /// The keyboard shortcuts window (Ctrl+/), while open.
+    keys: RefCell<Option<KeysWindow>>,
 }
 
 thread_local! {
@@ -210,6 +225,15 @@ pub fn run() {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            // Keys and mouse for the preferences and shortcuts windows are
+            // theirs: the main window's shortcuts must not see them.
+            if let Some(handled) = app.popup_message(&mut msg) {
+                if !handled {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                continue;
+            }
             if app.intercept(&mut msg) {
                 continue;
             }
@@ -249,6 +273,8 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             ..Default::default()
         };
         RegisterClassExW(&class);
+        prefs::register(instance)?;
+        keys_ui::register(instance)?;
         let settings_dir = settings::dir();
         let settings = settings_dir
             .as_deref()
@@ -307,6 +333,7 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
         let editor = Editor::create(hwnd, instance, true)?;
 
         let paper = Paper::parse(settings.get("paper").unwrap_or(""));
+        let theme = Theme::for_scheme(settings.color_scheme());
         let meta = Metadata::load(&dir).unwrap_or_default();
         let list = carousel::arrange(
             list,
@@ -333,7 +360,7 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             restyle_posted: Cell::new(false),
             undoing: Cell::new(false),
             pacer: RefCell::new(None),
-            theme: Cell::new(Theme::current()),
+            theme: Cell::new(theme),
             dpi: Cell::new(dpi),
             generation: Cell::new(0),
             ocr_running: Cell::new(false),
@@ -351,6 +378,8 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             settings: RefCell::new(settings),
             meta: RefCell::new(meta),
             hide_new: Cell::new(false),
+            prefs: RefCell::new(None),
+            keys: RefCell::new(None),
         }));
         APP.with(|a| a.set(app).ok());
         actions::install_cursor_hook();
@@ -584,7 +613,8 @@ impl App {
     fn retheme(&self) {
         self.hide_suggestions();
         self.finish_swipe();
-        let theme = Theme::current();
+        let scheme = self.settings.borrow().color_scheme();
+        let theme = Theme::for_scheme(scheme);
         self.theme.set(theme);
         theme.apply_to_frame(self.hwnd);
         for editor in self.editors.iter().filter_map(OnceCell::get) {
@@ -598,6 +628,7 @@ impl App {
         canvas::set(self.paper.get(), &theme);
         self.restyle();
         self.style_search();
+        self.restyle_popups();
     }
 
     /// Restyles after a theme change.
@@ -903,6 +934,8 @@ impl App {
             VK_OEM_6 => self.go(Nav::Newer),
             VK_OEM_4 => self.go(Nav::Older),
             VK_N => self.go(Nav::Last),
+            VK_OEM_COMMA if !shift => self.open_prefs(),
+            VK_OEM_2 if !shift => self.open_keys(),
             VK_D => self.delete_note(),
             VK_T if shift => self.restore_note(),
             VK_F => self.open_search(),
@@ -1009,9 +1042,7 @@ impl App {
     /// Alt+P: blank, dotted, grid, large grid, and round again.
     fn next_paper(&self) {
         let paper = self.paper.get().next();
-        self.paper.set(paper);
-        canvas::set(paper, &self.theme.get());
-        self.save_setting("paper", paper.name());
+        self.set_paper(paper);
         // SAFETY: the string outlives the call.
         unsafe { OutputDebugStringW(&HSTRING::from(format!("whisp: paper {}\n", paper.name()))) };
         let message = match paper {
@@ -1021,6 +1052,15 @@ impl App {
             Paper::LargeGrid => "Paper: large grid",
         };
         self.show_status_for(message, PAPER_STATUS_MS);
+    }
+
+    /// Shows `paper` behind the notes, saves it and updates the preferences
+    /// window.
+    fn set_paper(&self, paper: Paper) {
+        self.paper.set(paper);
+        canvas::set(paper, &self.theme.get());
+        self.save_setting("paper", paper.name());
+        self.sync_paper_choice();
     }
 }
 
@@ -1088,6 +1128,9 @@ impl App {
         if notes::is_blank(&self.editor().text()) || !self.flush() {
             return;
         }
+        if self.settings.borrow().confirm_delete() && !self.confirm_delete() {
+            return;
+        }
         match trash::delete(&self.dir, &path) {
             Ok(name) => {
                 let mut deleted = self.deleted();
@@ -1101,6 +1144,41 @@ impl App {
             }
             Err(_) => self.show_status("Could not delete the note"),
         }
+    }
+
+    /// Asks whether to delete the current note, in a task dialog: Delete or
+    /// Cancel, with Cancel the default and Esc. True for Delete.
+    fn confirm_delete(&self) -> bool {
+        let title = crate::search::title(&self.editor().text());
+        let content = HSTRING::from(format!(
+            "\u{201c}{title}\u{201d} will be moved to the trash. \
+             You can undo this with Ctrl+Shift+T."
+        ));
+        let delete = TASKDIALOG_BUTTON {
+            nButtonID: DELETE_BUTTON,
+            pszButtonText: w!("Delete"),
+        };
+        let buttons = [delete];
+        let config = TASKDIALOGCONFIG {
+            cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+            hwndParent: self.hwnd,
+            // Esc and the close button cancel; centred on the window, not
+            // the screen.
+            dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW,
+            dwCommonButtons: TDCBF_CANCEL_BUTTON,
+            pszWindowTitle: w!("Whisp"),
+            pszMainInstruction: w!("Delete Note?"),
+            pszContent: PCWSTR(content.as_ptr()),
+            cButtons: buttons.len() as u32,
+            pButtons: buttons.as_ptr(),
+            nDefaultButton: IDCANCEL.0,
+            ..Default::default()
+        };
+        let mut pressed = 0;
+        // SAFETY: `config` and what it points to (`buttons`, `content`)
+        // outlive the call; `pressed` is a live local.
+        let result = unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) };
+        result.is_ok() && pressed == DELETE_BUTTON
     }
 
     /// Ctrl+Shift+T: brings back the most recently deleted note that is

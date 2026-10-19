@@ -1,5 +1,6 @@
-//! Embeds the icon and version information in the Windows executable:
-//! writes a resource script, compiles it with windres and links the object.
+//! Embeds the icon, manifest and version information in the Windows
+//! executable: writes a resource script, compiles it with windres and links
+//! the object.
 
 use std::env;
 use std::path::PathBuf;
@@ -8,12 +9,14 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/whisp.ico");
+    println!("cargo:rerun-if-changed=assets/whisp.manifest");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let icon = manifest.join("assets").join("whisp.ico");
+    let app_manifest = manifest.join("assets").join("whisp.manifest");
     let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let mut numbers = version
         .split(['.', '-', '+'])
@@ -22,9 +25,12 @@ fn main() {
     let (major, minor, patch) = (next(), next(), next());
 
     // Numbers instead of winver.h names: VOS_NT_WINDOWS32 is 0x40004 and
-    // VFT_APP is 1. Resource 1 is the icon the window class loads.
+    // VFT_APP is 1. Resource 1 is the icon the window class loads. Type 24,
+    // ID 1 is the application manifest (RT_MANIFEST, CREATEPROCESS_MANIFEST_
+    // RESOURCE_ID): Common Controls 6 and the Windows 10/11 declaration.
     let script = format!(
         r#"1 ICON "{icon}"
+1 24 "{app_manifest}"
 1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0
 PRODUCTVERSION {major},{minor},{patch},0
@@ -50,6 +56,7 @@ BEGIN
 END
 "#,
         icon = icon.display().to_string().replace('\\', "/"),
+        app_manifest = app_manifest.display().to_string().replace('\\', "/"),
     );
     let rc = out.join("whisp.rc");
     std::fs::write(&rc, script).expect("write whisp.rc");
