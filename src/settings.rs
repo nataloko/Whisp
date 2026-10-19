@@ -50,6 +50,32 @@ impl Settings {
             .find_map(|line| split(line).filter(|(k, _)| *k == key).map(|(_, v)| v))
     }
 
+    /// A non-negative whole number setting; a missing or invalid value gives
+    /// `default`.
+    fn number(&self, key: &str, default: u32) -> u32 {
+        self.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// Notes older than this many days are left out of the carousel; 0 is off.
+    pub fn archive_days(&self) -> u32 {
+        self.number("archive_days", 0)
+    }
+
+    /// How many unpinned notes the carousel keeps; 0 is unlimited.
+    pub fn max_carousel_size(&self) -> u32 {
+        self.number("max_carousel_size", 10)
+    }
+
+    /// What is shown at startup.
+    pub fn startup(&self) -> Startup {
+        match self.get("startup") {
+            Some("empty_note") => Startup::EmptyNote,
+            _ => Startup::LastNote,
+        }
+    }
+
     /// Sets `key`, replacing its line or adding one at the end.
     pub fn set(&mut self, key: &str, value: &str) {
         let line = format!("{key}={value}");
@@ -73,6 +99,15 @@ impl Settings {
     pub fn save(&self, dir: &Path) -> io::Result<()> {
         notes::write_atomic(&dir.join(FILE), &self.to_text())
     }
+}
+
+/// The `startup` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Startup {
+    /// The note that was shown when the app closed (the default).
+    LastNote,
+    /// The empty page.
+    EmptyNote,
 }
 
 /// A window's normal (restored) rectangle and whether it is maximized, as
@@ -156,6 +191,19 @@ mod tests {
         let mut empty = Settings::default();
         empty.set("paper", "grid");
         assert_eq!(empty.to_text(), "paper=grid\n");
+    }
+
+    #[test]
+    fn carousel_and_startup_settings() {
+        let s = Settings::default();
+        assert_eq!((s.archive_days(), s.max_carousel_size()), (0, 10));
+        assert_eq!(s.startup(), Startup::LastNote);
+        let s = Settings::parse("archive_days=30\nmax_carousel_size=0\nstartup=empty_note");
+        assert_eq!((s.archive_days(), s.max_carousel_size()), (30, 0));
+        assert_eq!(s.startup(), Startup::EmptyNote);
+        let s = Settings::parse("archive_days=-1\nmax_carousel_size=x\nstartup=other");
+        assert_eq!((s.archive_days(), s.max_carousel_size()), (0, 10));
+        assert_eq!(s.startup(), Startup::LastNote);
     }
 
     #[test]

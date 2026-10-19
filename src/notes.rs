@@ -29,9 +29,9 @@ fn is_note(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
-/// The notes in `dir`, oldest first by modified time. Blank notes are
-/// deleted, as Whisp does; subfolders and other files are ignored.
-pub fn list(dir: &Path) -> io::Result<Vec<PathBuf>> {
+/// The notes in `dir` with their modified times, oldest first. Blank notes
+/// are deleted, as Whisp does; subfolders and other files are ignored.
+pub fn list(dir: &Path) -> io::Result<Vec<(PathBuf, SystemTime)>> {
     let mut notes = Vec::new();
     for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
@@ -44,10 +44,10 @@ pub fn list(dir: &Path) -> io::Result<Vec<PathBuf>> {
             let _ = fs::remove_file(&path);
             continue;
         }
-        notes.push((meta.modified().unwrap_or(UNIX_EPOCH), path));
+        notes.push((path, meta.modified().unwrap_or(UNIX_EPOCH)));
     }
-    notes.sort();
-    Ok(notes.into_iter().map(|(_, path)| path).collect())
+    notes.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    Ok(notes)
 }
 
 /// File contents as editor text: BOM stripped, `\n` line endings. Invalid
@@ -185,7 +185,7 @@ mod tests {
         let names: Vec<_> = list(&dir)
             .unwrap()
             .iter()
-            .map(|p| p.file_name().unwrap().to_owned())
+            .map(|(p, _)| p.file_name().unwrap().to_owned())
             .collect();
         assert_eq!(names, ["old.md", "mid.MD", "new.md"]);
         assert!(!dir.join("blank.md").exists());

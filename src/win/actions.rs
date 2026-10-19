@@ -27,7 +27,7 @@ use windows::core::{GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, s, w};
 
 use super::{App, Nav, canvas};
 use crate::markup::{self, Wrap};
-use crate::{expand, lists, notes};
+use crate::{expand, lists, metadata, notes};
 
 const CF_UNICODETEXT: u32 = 13;
 /// Mouse message key flags.
@@ -177,9 +177,9 @@ impl App {
     }
 
     /// Ctrl+Shift+B: saves the note, touches its modified time and moves it
-    /// to just before the empty note, as the newest, as Whisp does.
+    /// to just before the empty note, as the newest, as Whisp does. A pinned
+    /// note keeps its place.
     pub(super) fn bump_note(&self) {
-        // TODO(pinned notes, batch 3): pinned notes keep their place.
         let current = self.current.get();
         let Some(path) = self.notes.borrow().get(current).cloned() else {
             return;
@@ -195,6 +195,10 @@ impl App {
             self.show_status("Could not move the note");
             return;
         }
+        if self.is_pinned(&path) {
+            self.show_status("Note moved to front");
+            return;
+        }
         let last = {
             let mut notes = self.notes.borrow_mut();
             let note = notes.remove(current);
@@ -205,6 +209,42 @@ impl App {
         self.current.set(last);
         self.peek.set(None);
         self.show_status("Note moved to front");
+    }
+
+    /// Ctrl+Shift+P: pins or unpins the current note, as in Whisp. The flag
+    /// goes into `metadata.json`; a pinned note moves to the front, an
+    /// unpinned one back to its place by modified time. On the empty page
+    /// the text is saved first, and with no text there is nothing to pin.
+    pub(super) fn toggle_pin(&self) {
+        if !self.flush() {
+            return;
+        }
+        let current = self.current.get();
+        let Some(path) = self.notes.borrow().get(current).cloned() else {
+            return;
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let pin = !self.is_pinned(&path);
+        match metadata::update_flag(&self.dir, name, "pinned", pin) {
+            Ok(meta) => *self.meta.borrow_mut() = meta,
+            Err(_) => {
+                self.show_status("Could not save the pin");
+                return;
+            }
+        }
+        self.notes.borrow_mut().remove(current);
+        let at = if pin {
+            0
+        } else {
+            self.insert_index(&path, false)
+        };
+        self.notes.borrow_mut().insert(at, path);
+        // Same note in the same editor: only its place in the list changes.
+        self.current.set(at);
+        self.peek.set(None);
+        self.show_status(if pin { "Note pinned" } else { "Note unpinned" });
     }
 
     /// Alt+F and Alt+L: the first note, and the last page, which is the

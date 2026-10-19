@@ -11,9 +11,9 @@ mod theme;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{
@@ -28,12 +28,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
+use crate::carousel;
 use crate::gesture::Side;
 use crate::lists;
+use crate::metadata::Metadata;
 use crate::notes;
 use crate::paper::Paper;
 use crate::search::{Index, Row};
-use crate::settings::{self, Placement, Settings};
+use crate::settings::{self, Placement, Settings, Startup};
 use crate::trash;
 use editor::Editor;
 use ocr::WM_OCR_DONE;
@@ -84,8 +86,9 @@ struct App {
     /// Start of the clock for gesture times.
     epoch: Instant,
     dir: PathBuf,
-    /// Saved notes, oldest first. Index `notes.len()` is the empty note at
-    /// the end, which gets a file once it has text.
+    /// Saved notes: pinned ones first, then the rest, each oldest first.
+    /// Index `notes.len()` is the empty note at the end, which gets a file
+    /// once it has text.
     notes: RefCell<Vec<PathBuf>>,
     current: Cell<usize>,
     dirty: Cell<bool>,
@@ -125,6 +128,9 @@ struct App {
     /// Where `settings` lives; None without LOCALAPPDATA.
     settings_dir: Option<PathBuf>,
     settings: RefCell<Settings>,
+    /// Whisp's `metadata.json` in the notes folder, as last read or written.
+    /// Empty if it could not be read; writes then refuse to overwrite it.
+    meta: RefCell<Metadata>,
 }
 
 thread_local! {
@@ -209,7 +215,7 @@ pub fn run() {
     }
 }
 
-fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static App> {
+fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Result<&'static App> {
     // SAFETY: window creation on this thread; the class name is static.
     unsafe {
         LoadLibraryW(w!("Msftedit.dll"))?;
@@ -297,7 +303,15 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
         let editor = Editor::create(hwnd, instance, true)?;
 
         let paper = Paper::parse(settings.get("paper").unwrap_or(""));
-        let current = list.len().saturating_sub(1);
+        let meta = Metadata::load(&dir).unwrap_or_default();
+        let list = carousel::arrange(
+            list,
+            SystemTime::now(),
+            settings.archive_days(),
+            settings.max_carousel_size() as usize,
+            |p| is_pinned(&meta, p),
+        );
+        let current = start_index(&list, &settings);
         let app: &'static App = Box::leak(Box::new(App {
             hwnd,
             instance,
@@ -331,6 +345,7 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             paper: Cell::new(paper),
             settings_dir,
             settings: RefCell::new(settings),
+            meta: RefCell::new(meta),
         }));
         APP.with(|a| a.set(app).ok());
         actions::install_cursor_hook();
@@ -509,6 +524,7 @@ impl App {
                 self.save_placement();
                 if wparam.0 != 0 && self.flush() {
                     self.drop_if_blank();
+                    self.save_last_note();
                 }
             }
             WM_DESTROY => {
@@ -711,6 +727,12 @@ impl App {
     fn update_title(&self) {
         let position = self.current.get() + 1;
         let total = self.notes.borrow().len() + 1;
+        let pinned = self
+            .notes
+            .borrow()
+            .get(self.current.get())
+            .is_some_and(|p| self.is_pinned(p));
+        let pin = if pinned { " \u{b7} Pinned" } else { "" };
         let mark = if self.save_failed.get() { " *" } else { "" };
         let status = match *self.status.borrow() {
             Some(message) => format!(" \u{b7} {message}"),
@@ -718,7 +740,7 @@ impl App {
             None if self.search_open.get() => " \u{b7} Search".to_string(),
             None => String::new(),
         };
-        let title = HSTRING::from(format!("Whisp  {position}/{total}{mark}{status}"));
+        let title = HSTRING::from(format!("Whisp  {position}/{total}{pin}{mark}{status}"));
         // SAFETY: `title` outlives the call.
         let _ = unsafe { SetWindowTextW(self.hwnd, &title) };
     }
@@ -743,8 +765,39 @@ impl App {
                     return;
                 }
             }
+            self.save_last_note();
             let _ = DestroyWindow(self.hwnd);
         }
+    }
+
+    /// Remembers which note is shown, or the empty page, for the next start.
+    /// Called after a blank note has been dropped, so it is not remembered.
+    fn save_last_note(&self) {
+        let name = self
+            .notes
+            .borrow()
+            .get(self.current.get())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.save_setting("last_note", &name);
+    }
+
+    /// Whether the note at `path` is pinned in Whisp's metadata.
+    fn is_pinned(&self, path: &Path) -> bool {
+        is_pinned(&self.meta.borrow(), path)
+    }
+
+    /// Where a note goes when it is unpinned or restored, by Whisp's walk
+    /// over the current list (which must not hold the note).
+    fn insert_index(&self, path: &Path, pinned: bool) -> usize {
+        let others: Vec<_> = self
+            .notes
+            .borrow()
+            .iter()
+            .map(|p| (self.is_pinned(p), modified(p)))
+            .collect();
+        carousel::insert_position(&others, pinned, modified(path))
     }
 
     /// Handles a key before RichEdit sees it; returns true if it was used.
@@ -834,6 +887,7 @@ impl App {
                 self.editor().list_action(lists::toggle_checkbox, false);
             }
             VK_B if shift => self.bump_note(),
+            VK_P if shift => self.toggle_pin(),
             VK_B => self.wrap_key("**"),
             VK_I => self.wrap_key("*"),
             VK_U => self.wrap_key("_"),
@@ -1036,17 +1090,8 @@ impl App {
             self.save_setting("deleted", &trash::format_deleted(&deleted));
             // Leaving the current note, as navigation does.
             self.drop_if_blank();
-            let modified = |p: &PathBuf| {
-                fs::metadata(p)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH)
-            };
-            let time = modified(&path);
-            let position = {
-                let notes = self.notes.borrow();
-                let times: Vec<_> = notes.iter().map(modified).collect();
-                trash::position(&times, time)
-            };
+            // It keeps its file name, so a pin from before survives.
+            let position = self.insert_index(&path, self.is_pinned(&path));
             self.notes.borrow_mut().insert(position, path);
             self.show(position);
             self.show_status("Note restored");
@@ -1055,6 +1100,34 @@ impl App {
         self.save_setting("deleted", "");
         self.show_status("No deleted note to restore");
     }
+}
+
+/// The note's modified time, or the epoch if it cannot be read.
+fn modified(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Whether `meta` marks the note at `path` as pinned, by file name.
+fn is_pinned(meta: &Metadata, path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| meta.flag(name, "pinned"))
+}
+
+/// The index shown at startup: the empty page for `startup=empty_note`,
+/// else the note shown at the last close if it is in the carousel, else the
+/// newest note. As in Whisp, closing on the empty page also gives the
+/// newest note.
+fn start_index(list: &[PathBuf], settings: &Settings) -> usize {
+    if settings.startup() == Startup::EmptyNote {
+        return list.len();
+    }
+    let name = settings.get("last_note").unwrap_or("");
+    list.iter()
+        .position(|p| p.file_name().is_some_and(|n| n == name))
+        .unwrap_or(list.len().saturating_sub(1))
 }
 
 /// Whether a saved window rectangle is on a monitor that exists now.

@@ -5,7 +5,6 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use crate::notes;
 
@@ -88,16 +87,9 @@ pub fn format_deleted(names: &[String]) -> String {
     names[start..].join(&SEPARATOR.to_string())
 }
 
-/// Where a note modified at `time` goes in a list ordered oldest first:
-/// after every note not newer than it.
-pub fn position(times: &[SystemTime], time: SystemTime) -> usize {
-    times.iter().position(|&t| t > time).unwrap_or(times.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("whisp-trash-{}", notes::new_name()));
@@ -170,16 +162,5 @@ mod tests {
         assert_eq!(kept.len(), 20);
         assert_eq!(kept.first().unwrap(), "10.md");
         assert_eq!(kept.last().unwrap(), "29.md");
-    }
-
-    #[test]
-    fn position_by_time() {
-        let t = |s| UNIX_EPOCH + Duration::from_secs(s);
-        let times = [t(10), t(20), t(30)];
-        assert_eq!(position(&times, t(5)), 0);
-        assert_eq!(position(&times, t(20)), 2);
-        assert_eq!(position(&times, t(25)), 2);
-        assert_eq!(position(&times, t(99)), 3);
-        assert_eq!(position(&[], t(1)), 0);
     }
 }

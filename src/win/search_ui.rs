@@ -458,9 +458,9 @@ impl App {
             .is_some_and(|p| p.file_name() == path.file_name())
     }
 
-    /// The index of `path` in the note list. A note made since startup
-    /// (by another program, say) is added after the newest note: it is newer
-    /// than every note listed at startup, so the oldest first order holds.
+    /// The index of `path` in the note list. A note that is not in the list,
+    /// made since startup or left out as archived, is added just before the
+    /// empty note, as the newest.
     fn position_of(&self, path: &Path) -> usize {
         let mut notes = self.notes.borrow_mut();
         if let Some(i) = notes.iter().position(|p| p.file_name() == path.file_name()) {

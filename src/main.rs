@@ -4,13 +4,16 @@
 // them everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod carousel;
 mod dib;
 mod expand;
 mod gesture;
+mod json;
 mod lines;
 mod lists;
 mod markdown;
 mod markup;
+mod metadata;
 mod notes;
 mod ocr_text;
 mod paper;
