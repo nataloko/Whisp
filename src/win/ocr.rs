@@ -155,6 +155,8 @@ fn read(dib: &[u8]) -> windows::core::Result<Outcome> {
                 text: word.Text()?.to_string_lossy(),
                 left: f64::from(rect.X),
                 width: f64::from(rect.Width),
+                top: f64::from(rect.Y),
+                height: f64::from(rect.Height),
             });
         }
         lines.push(words);
