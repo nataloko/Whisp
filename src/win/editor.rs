@@ -205,7 +205,10 @@ impl Editor {
         // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
-            // Also sets the default format, used when typing into an empty note.
+            // Emptied first: formatting the old text takes over a second in a
+            // long note. Also sets the default format, used when typing into
+            // an empty note.
+            self.stream_in(&[], SF_TEXT);
             self.reset_format(theme);
             self.stream_in(document.as_bytes(), SF_RTF);
             if !self.has_text(&expected) {
