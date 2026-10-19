@@ -96,6 +96,7 @@ impl App {
                 // from before keyboard navigation, so it is loaded afresh.
                 self.flush();
                 self.peek.set(None);
+                self.hide_suggestions();
                 let (older, newer) = self.neighbours();
                 Swipe::new(width, older, newer, now)
             }
@@ -368,6 +369,7 @@ impl App {
             return false;
         };
         // Leaving the current note, as `go` does.
+        self.hide_suggestions();
         let removed = self.drop_if_blank();
         let index = if removed && side == Side::Newer {
             index - 1
@@ -405,6 +407,9 @@ impl App {
     pub(super) fn intercept(&self, msg: &mut MSG) -> bool {
         if self.search_open.get() {
             return self.search_intercept(msg);
+        }
+        if self.suggestion_mouse(msg) {
+            return true;
         }
         match msg.message {
             WM_MOUSEHWHEEL => {

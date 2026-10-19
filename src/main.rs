@@ -5,6 +5,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod dib;
+mod expand;
 mod gesture;
 mod lines;
 mod lists;

@@ -4,6 +4,7 @@ mod canvas;
 mod editor;
 mod ocr;
 mod search_ui;
+mod suggest;
 mod swipe;
 mod theme;
 
@@ -32,6 +33,7 @@ use crate::settings::{self, Settings};
 use editor::Editor;
 use ocr::WM_OCR_DONE;
 use search_ui::{Panel, TIMER_SEARCH, WM_SEARCH_OPEN};
+use suggest::{Popup, WM_SUGGEST};
 use swipe::{Pacer, SwipeState, WM_SWIPE_FRAME};
 use theme::Theme;
 
@@ -102,6 +104,13 @@ struct App {
     search_rows: RefCell<Vec<Row>>,
     /// All notes for searching, cached by modified time.
     index: RefCell<Index>,
+    /// The `::` suggestion popup, created on first use.
+    suggest: OnceCell<Popup>,
+    suggest_open: Cell<bool>,
+    /// The commands the popup lists, with their descriptions.
+    suggest_rows: RefCell<Vec<(&'static str, &'static str)>>,
+    /// A WM_SUGGEST is posted and not handled yet.
+    suggest_posted: Cell<bool>,
     paper: Cell<Paper>,
     /// Where `settings` lives; None without LOCALAPPDATA.
     settings_dir: Option<PathBuf>,
@@ -258,6 +267,10 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             search_open: Cell::new(false),
             search_rows: RefCell::new(Vec::new()),
             index: RefCell::new(Index::default()),
+            suggest: OnceCell::new(),
+            suggest_open: Cell::new(false),
+            suggest_rows: RefCell::new(Vec::new()),
+            suggest_posted: Cell::new(false),
             paper: Cell::new(paper),
             settings_dir,
             settings: RefCell::new(settings),
@@ -293,6 +306,7 @@ impl App {
             WM_ACTIVATE => {
                 if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
                     self.finish_swipe();
+                    self.hide_suggestions();
                 }
                 return None;
             }
@@ -345,6 +359,9 @@ impl App {
                 // SAFETY: for WM_DRAWITEM, lparam points to a DRAWITEMSTRUCT.
                 let item =
                     unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::DRAWITEMSTRUCT) };
+                if self.draw_suggestion(item) {
+                    return Some(LRESULT(1));
+                }
                 if !self.search_panel().is_some_and(|p| p.list == item.hwndItem) {
                     return None;
                 }
@@ -352,8 +369,22 @@ impl App {
                 return Some(LRESULT(1));
             }
             WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-                return self.search_color(HDC(wparam.0 as *mut _), HWND(lparam.0 as *mut _));
+                let (hdc, control) = (HDC(wparam.0 as *mut _), HWND(lparam.0 as *mut _));
+                return self
+                    .suggestion_color(hdc, control)
+                    .or_else(|| self.search_color(hdc, control));
             }
+            WM_NOTIFY => {
+                // SAFETY: for WM_NOTIFY, lparam points to an NMHDR.
+                let header = unsafe { &*(lparam.0 as *const windows::Win32::UI::Controls::NMHDR) };
+                if header.hwndFrom == self.editor().hwnd
+                    && header.code == windows::Win32::UI::Controls::RichEdit::EN_SELCHANGE
+                {
+                    self.selection_changed();
+                }
+                return None;
+            }
+            WM_SUGGEST => self.update_suggestions(),
             WM_SEARCH_OPEN if self.search_open.get() => self.open_row(wparam.0),
             WM_TIMER => self.timer(wparam.0),
             WM_SWIPE_FRAME => self.swipe_frame_message(),
@@ -428,6 +459,7 @@ impl App {
     /// Both editors at rest: the current one filling the window, the peek
     /// editor hidden behind it with the same size and padding.
     fn layout(&self) {
+        self.hide_suggestions();
         let mut rc = RECT::default();
         // SAFETY: `rc` is a live local; the windows are alive.
         unsafe {
@@ -445,6 +477,7 @@ impl App {
     }
 
     fn retheme(&self) {
+        self.hide_suggestions();
         self.finish_swipe();
         let theme = Theme::current();
         self.theme.set(theme);
@@ -578,6 +611,7 @@ impl App {
     /// Loads note `index` (or the empty note) into the editor. Notes that
     /// cannot be read are dropped from the list.
     fn show(&self, index: usize) {
+        self.hide_suggestions();
         let text = loop {
             let path = self.notes.borrow().get(index).cloned();
             match path.map(|p| notes::read(&p)) {
@@ -668,10 +702,19 @@ impl App {
         let key = VIRTUAL_KEY(msg.wParam.0 as u16);
         let shift = down(VK_SHIFT);
         if !down(VK_CONTROL) {
+            if let Some(used) = self.suggestion_key(key, shift) {
+                return used;
+            }
             match key {
                 VK_INSERT if shift => self.paste(),
-                // Enter continues lists; elsewhere it stays RichEdit's.
-                VK_RETURN if !shift => return self.editor().list_action(lists::enter, true),
+                // A complete `::command` before the caret expands, with the
+                // space or line break after it, as in Whisp.
+                VK_SPACE if !shift => return self.expand_at_caret(" "),
+                // Then Enter continues lists; elsewhere it stays RichEdit's.
+                VK_RETURN if !shift => {
+                    return self.expand_at_caret("\n")
+                        || self.editor().list_action(lists::enter, true);
+                }
                 // Tab always indents the line, as in Whisp, never typing a tab.
                 VK_TAB if shift => {
                     self.editor().list_action(lists::shift_tab, false);

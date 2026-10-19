@@ -133,6 +133,7 @@ impl App {
             return;
         }
         self.finish_swipe();
+        self.hide_suggestions();
         // Saved first, so the index sees the current note as it is.
         self.flush();
         if self.search.get().is_none() {

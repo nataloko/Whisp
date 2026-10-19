@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{COLORREF, HGLOBAL, HINSTANCE, HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::InvalidateRect;
+use windows::Win32::Graphics::Gdi::{InvalidateRect, TA_BOTTOM, TA_TOP, TEXT_ALIGN_OPTIONS};
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -53,7 +53,9 @@ impl Editor {
         visible: bool,
     ) -> windows::core::Result<Editor> {
         let shown = if visible { WS_VISIBLE } else { WINDOW_STYLE(0) };
-        let style = (WS_CHILD | shown | WS_VSCROLL).0 | (ES_MULTILINE | ES_AUTOVSCROLL) as u32;
+        // WS_CLIPSIBLINGS: never paint over the suggestion popup above.
+        let style = (WS_CHILD | shown | WS_VSCROLL | WS_CLIPSIBLINGS).0
+            | (ES_MULTILINE | ES_AUTOVSCROLL) as u32;
         // SAFETY: plain window creation and messages without pointers, except
         // EM_GETOLEINTERFACE which writes one pointer to a live local.
         unsafe {
@@ -74,7 +76,13 @@ impl Editor {
             send(hwnd, EM_EXLIMITTEXT, 0, 0x7fff_fffe);
             // Wrap lines at the window edge.
             send(hwnd, EM_SETTARGETDEVICE, 0, 0);
-            send(hwnd, EM_SETEVENTMASK, 0, ENM_CHANGE as isize);
+            // Selection changes drive the `::` suggestion popup.
+            send(
+                hwnd,
+                EM_SETEVENTMASK,
+                0,
+                (ENM_CHANGE | ENM_SELCHANGE) as isize,
+            );
             // Before any text goes in: text streamed into an empty control
             // takes the default format.
             let mut cf = format();
@@ -158,7 +166,7 @@ impl Editor {
     }
 
     /// The text as RichEdit stores it: UTF-16 with `\r` paragraph breaks.
-    fn text_utf16(&self) -> Vec<u16> {
+    pub(super) fn text_utf16(&self) -> Vec<u16> {
         let len = self.len();
         let mut buf = vec![0u16; len + 1];
         let info = GETTEXTEX {
@@ -307,7 +315,7 @@ impl Editor {
     }
 
     /// The selection as UTF-16 offsets, start first.
-    fn selection(&self) -> (usize, usize) {
+    pub(super) fn selection(&self) -> (usize, usize) {
         let mut range = CHARRANGE::default();
         // SAFETY: `range` outlives the call.
         unsafe { send(self.hwnd, EM_EXGETSEL, 0, &mut range as *mut _ as isize) };
@@ -334,6 +342,51 @@ impl Editor {
         };
         self.apply_edit(&lines, &edit);
         true
+    }
+
+    /// Replaces UTF-16 offsets `start..end` with `text` (`\n` breaks) as one
+    /// undo step. The caret ends after the new text.
+    pub(super) fn replace_range(&self, start: usize, end: usize, text: &str) {
+        let range = CHARRANGE {
+            cpMin: start as i32,
+            cpMax: end as i32,
+        };
+        // SAFETY: `range` outlives the call.
+        unsafe { send(self.hwnd, EM_EXSETSEL, 0, &range as *const _ as isize) };
+        self.replace_plain(text);
+    }
+
+    /// The text from `from` to `to` (UTF-16 offsets, clamped).
+    pub(super) fn text_range(&self, from: usize, to: usize) -> Vec<u16> {
+        let to = to.min(self.len());
+        let from = from.min(to);
+        let mut buf = vec![0u16; to - from + 1];
+        let mut range = TEXTRANGEW {
+            chrg: CHARRANGE {
+                cpMin: from as i32,
+                cpMax: to as i32,
+            },
+            lpstrText: windows::core::PWSTR(buf.as_mut_ptr()),
+        };
+        // SAFETY: `buf` holds the range plus a NUL and outlives the call.
+        let n = unsafe { send(self.hwnd, EM_GETTEXTRANGE, 0, &mut range as *mut _ as isize) };
+        buf.truncate((n.max(0) as usize).min(to - from));
+        buf
+    }
+
+    /// Screen coordinates of the character at `offset`: its left edge, and
+    /// the top and bottom of its line. `None` when it is not on screen.
+    pub(super) fn char_box(&self, offset: usize) -> Option<(i32, i32, i32)> {
+        let doc = self.doc.as_ref()?;
+        let (mut x, mut top, mut bottom) = (0, 0, 0);
+        // SAFETY: plain TOM calls; the out pointers are live locals.
+        unsafe {
+            let range = doc.Range(offset as i32, offset as i32).ok()?;
+            let at = |align: TEXT_ALIGN_OPTIONS| tomConstants(tomStart.0 | align.0 as i32);
+            range.GetPoint(at(TA_TOP), &mut x, &mut top).ok()?;
+            range.GetPoint(at(TA_BOTTOM), &mut x, &mut bottom).ok()?;
+        }
+        Some((x, top, bottom))
     }
 
     /// Replaces the edit's range with one EM_REPLACESEL, then places the
