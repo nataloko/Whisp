@@ -15,7 +15,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, HDC};
+use windows::Win32::Graphics::Gdi::{
+    CreateSolidBrush, DeleteObject, FillRect, GetMonitorInfoW, HDC, MONITOR_DEFAULTTONULL,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromRect,
+};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -29,7 +32,8 @@ use crate::lists;
 use crate::notes;
 use crate::paper::Paper;
 use crate::search::{Index, Row};
-use crate::settings::{self, Settings};
+use crate::settings::{self, Placement, Settings};
+use crate::trash;
 use editor::Editor;
 use ocr::WM_OCR_DONE;
 use search_ui::{Panel, TIMER_SEARCH, WM_SEARCH_OPEN};
@@ -45,6 +49,9 @@ const SAVE_RETRY_MS: u32 = 2000;
 const TIMER_STATUS: usize = 4;
 const STATUS_MS: u32 = 3000;
 const PAPER_STATUS_MS: u32 = 2000;
+/// Saves the window's size and position once it stops moving.
+const TIMER_PLACEMENT: usize = 6;
+const PLACEMENT_DELAY_MS: u32 = 1000;
 /// Posted after a change, so restyling runs once RichEdit has finished
 /// handling the keystroke.
 const WM_RESTYLE: u32 = WM_APP + 1;
@@ -204,14 +211,35 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
     unsafe {
         LoadLibraryW(w!("Msftedit.dll"))?;
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-        let class = WNDCLASSW {
+        // Resource 1, embedded by build.rs, in the large and small sizes.
+        let icon = |x, y| {
+            LoadImageW(
+                Some(instance),
+                // MAKEINTRESOURCE(1): an ID, not a pointer.
+                PCWSTR(std::ptr::without_provenance(1)),
+                IMAGE_ICON,
+                GetSystemMetrics(x),
+                GetSystemMetrics(y),
+                LR_DEFAULTCOLOR,
+            )
+            .map(|h| HICON(h.0))
+            .unwrap_or_default()
+        };
+        let class = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: instance,
             lpszClassName: CLASS,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: icon(SM_CXICON, SM_CYICON),
+            hIconSm: icon(SM_CXSMICON, SM_CYSMICON),
             ..Default::default()
         };
-        RegisterClassW(&class);
+        RegisterClassExW(&class);
+        let settings_dir = settings::dir();
+        let settings = settings_dir
+            .as_deref()
+            .map_or_else(Settings::default, Settings::load);
         let sys_dpi = GetDpiForSystem();
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -228,17 +256,43 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
             Some(instance),
             None,
         )?;
+        // The saved size and position, before the window is shown. Done
+        // before the app exists, so a DPI change on the way only updates
+        // the DPI and keeps the saved size.
+        let saved = settings.get("window").and_then(Placement::parse);
+        let maximized = match saved {
+            Some(p) if is_on_screen(&p) => {
+                let placement = WINDOWPLACEMENT {
+                    length: size_of::<WINDOWPLACEMENT>() as u32,
+                    showCmd: SW_HIDE.0 as u32,
+                    rcNormalPosition: RECT {
+                        left: p.left,
+                        top: p.top,
+                        right: p.right,
+                        bottom: p.bottom,
+                    },
+                    ..Default::default()
+                };
+                let _ = SetWindowPlacement(hwnd, &placement);
+                p.maximized
+            }
+            Some(_) => {
+                // Saved on a monitor that is gone: centre on the primary one.
+                centre_on_primary(hwnd, sys_dpi);
+                false
+            }
+            None => {
+                let dpi = GetDpiForWindow(hwnd);
+                if dpi != sys_dpi {
+                    let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+                    let _ = SetWindowPos(hwnd, None, 0, 0, scale(420, dpi), scale(600, dpi), flags);
+                }
+                false
+            }
+        };
         let dpi = GetDpiForWindow(hwnd);
-        if dpi != sys_dpi {
-            let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
-            let _ = SetWindowPos(hwnd, None, 0, 0, scale(420, dpi), scale(600, dpi), flags);
-        }
         let editor = Editor::create(hwnd, instance, true)?;
 
-        let settings_dir = settings::dir();
-        let settings = settings_dir
-            .as_deref()
-            .map_or_else(Settings::default, Settings::load);
         let paper = Paper::parse(settings.get("paper").unwrap_or(""));
         let current = list.len().saturating_sub(1);
         let app: &'static App = Box::leak(Box::new(App {
@@ -282,7 +336,14 @@ fn create(dir: PathBuf, list: Vec<PathBuf>) -> windows::core::Result<&'static Ap
         canvas::set(paper, &app.theme.get());
         app.layout();
         app.show(current);
-        let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+        let _ = ShowWindow(
+            hwnd,
+            if maximized {
+                SW_SHOWMAXIMIZED
+            } else {
+                SW_SHOWDEFAULT
+            },
+        );
         let _ = SetFocus(Some(app.editor().hwnd));
         Ok(app)
     }
@@ -302,7 +363,9 @@ impl App {
             WM_SIZE => {
                 self.cancel_swipe();
                 self.layout();
+                self.placement_changed();
             }
+            WM_MOVE => self.placement_changed(),
             WM_ACTIVATE => {
                 if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
                     self.finish_swipe();
@@ -435,6 +498,7 @@ impl App {
             WM_CLOSE => self.close(),
             WM_QUERYENDSESSION => return Some(LRESULT(self.flush() as isize)),
             WM_ENDSESSION => {
+                self.save_placement();
                 if wparam.0 != 0 && self.flush() {
                     self.drop_if_blank();
                 }
@@ -528,6 +592,10 @@ impl App {
             self.flush();
         } else if id == TIMER_SEARCH {
             self.run_search();
+        } else if id == TIMER_PLACEMENT {
+            // SAFETY: plain call.
+            let _ = unsafe { KillTimer(Some(self.hwnd), id) };
+            self.save_placement();
         } else if id == TIMER_STATUS {
             // SAFETY: plain call.
             let _ = unsafe { KillTimer(Some(self.hwnd), id) };
@@ -648,6 +716,7 @@ impl App {
 
     fn close(&self) {
         self.finish_swipe();
+        self.save_placement();
         // SAFETY: plain calls on our own window.
         unsafe {
             if self.flush() {
@@ -707,6 +776,8 @@ impl App {
             }
             match key {
                 VK_INSERT if shift => self.paste(),
+                // Shift+Delete deletes the note, as in Whisp.
+                VK_DELETE if shift => self.delete_note(),
                 // A complete `::command` before the caret expands, with the
                 // space or line break after it, as in Whisp.
                 VK_SPACE if !shift => return self.expand_at_caret(" "),
@@ -731,6 +802,8 @@ impl App {
             VK_OEM_6 => self.go(Nav::Newer),
             VK_OEM_4 => self.go(Nav::Older),
             VK_N => self.go(Nav::Last),
+            VK_D => self.delete_note(),
+            VK_T if shift => self.restore_note(),
             VK_F => self.open_search(),
             VK_V => self.paste(),
             VK_S => {
@@ -819,11 +892,7 @@ impl App {
         let paper = self.paper.get().next();
         self.paper.set(paper);
         canvas::set(paper, &self.theme.get());
-        if let Some(dir) = &self.settings_dir {
-            let mut settings = self.settings.borrow_mut();
-            settings.set("paper", paper.name());
-            let _ = settings.save(dir);
-        }
+        self.save_setting("paper", paper.name());
         // SAFETY: the string outlives the call.
         unsafe { OutputDebugStringW(&HSTRING::from(format!("whisp: paper {}\n", paper.name()))) };
         let message = match paper {
@@ -833,6 +902,166 @@ impl App {
             Paper::LargeGrid => "Paper: large grid",
         };
         self.show_status_for(message, PAPER_STATUS_MS);
+    }
+}
+
+impl App {
+    /// Sets `key` in settings.ini and writes the file, if it changed.
+    fn save_setting(&self, key: &str, value: &str) {
+        let Some(dir) = &self.settings_dir else {
+            return;
+        };
+        let mut settings = self.settings.borrow_mut();
+        if settings.get(key) == Some(value) {
+            return;
+        }
+        settings.set(key, value);
+        let _ = settings.save(dir);
+    }
+
+    /// The window moved or changed size: save that once it settles.
+    fn placement_changed(&self) {
+        // SAFETY: a timer on our own window; restarting it resets its delay.
+        unsafe { SetTimer(Some(self.hwnd), TIMER_PLACEMENT, PLACEMENT_DELAY_MS, None) };
+    }
+
+    /// Saves the normal (restored) rectangle and whether the window is
+    /// maximized, also when it is minimized from the maximized state.
+    fn save_placement(&self) {
+        let mut placement = WINDOWPLACEMENT {
+            length: size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `placement` is a properly sized local.
+        if unsafe { GetWindowPlacement(self.hwnd, &mut placement) }.is_err() {
+            return;
+        }
+        let shown = placement.showCmd;
+        let maximized = shown == SW_SHOWMAXIMIZED.0 as u32
+            || (shown == SW_SHOWMINIMIZED.0 as u32
+                && placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0);
+        let rc = placement.rcNormalPosition;
+        let value = Placement {
+            left: rc.left,
+            top: rc.top,
+            right: rc.right,
+            bottom: rc.bottom,
+            maximized,
+        }
+        .format();
+        self.save_setting("window", &value);
+    }
+
+    /// The notes deleted with Ctrl+D, oldest first, by their names in the
+    /// trash.
+    fn deleted(&self) -> Vec<String> {
+        trash::parse_deleted(self.settings.borrow().get("deleted").unwrap_or(""))
+    }
+
+    /// Ctrl+D or Shift+Delete: moves the current note into Whisp's trash
+    /// folder, no dialog, as Ctrl+Shift+T brings it back. The empty note at
+    /// the end and blank notes are left alone.
+    fn delete_note(&self) {
+        let current = self.current.get();
+        let Some(path) = self.notes.borrow().get(current).cloned() else {
+            return;
+        };
+        if notes::is_blank(&self.editor().text()) || !self.flush() {
+            return;
+        }
+        match trash::delete(&self.dir, &path) {
+            Ok(name) => {
+                let mut deleted = self.deleted();
+                deleted.push(name);
+                self.save_setting("deleted", &trash::format_deleted(&deleted));
+                self.notes.borrow_mut().remove(current);
+                // The next note takes its place, as when Whisp's carousel
+                // removes a page: the newer one, or the empty note.
+                self.show(current);
+                self.show_status("Note deleted \u{b7} Ctrl+Shift+T to restore");
+            }
+            Err(_) => self.show_status("Could not delete the note"),
+        }
+    }
+
+    /// Ctrl+Shift+T: brings back the most recently deleted note that is
+    /// still in the trash, also from an earlier session, at its place by
+    /// modified time, and shows it.
+    fn restore_note(&self) {
+        if !self.flush() {
+            return;
+        }
+        let mut deleted = self.deleted();
+        while let Some(name) = deleted.pop() {
+            if !trash::is_in_trash(&self.dir, &name) {
+                // Emptied or restored by Whisp meanwhile.
+                continue;
+            }
+            let Ok(path) = trash::restore(&self.dir, &name) else {
+                self.show_status("Could not restore the note");
+                return;
+            };
+            self.save_setting("deleted", &trash::format_deleted(&deleted));
+            // Leaving the current note, as navigation does.
+            self.drop_if_blank();
+            let modified = |p: &PathBuf| {
+                fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH)
+            };
+            let time = modified(&path);
+            let position = {
+                let notes = self.notes.borrow();
+                let times: Vec<_> = notes.iter().map(modified).collect();
+                trash::position(&times, time)
+            };
+            self.notes.borrow_mut().insert(position, path);
+            self.show(position);
+            self.show_status("Note restored");
+            return;
+        }
+        self.save_setting("deleted", "");
+        self.show_status("No deleted note to restore");
+    }
+}
+
+/// Whether a saved window rectangle is on a monitor that exists now.
+fn is_on_screen(p: &Placement) -> bool {
+    let rect = RECT {
+        left: p.left,
+        top: p.top,
+        right: p.right,
+        bottom: p.bottom,
+    };
+    // SAFETY: plain call with a live local.
+    !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_invalid()
+}
+
+/// The default size, centred on the primary monitor's work area.
+fn centre_on_primary(hwnd: HWND, dpi: u32) {
+    let (width, height) = (scale(420, dpi), scale(600, dpi));
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: plain calls; `info` is a properly sized local.
+    unsafe {
+        let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let work = info.rcWork;
+        let x = work.left + (work.right - work.left - width) / 2;
+        let y = work.top + (work.bottom - work.top - height) / 2;
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 

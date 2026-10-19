@@ -16,6 +16,7 @@ mod paper;
 mod rtf;
 mod search;
 mod settings;
+mod trash;
 #[cfg(windows)]
 mod win;
 

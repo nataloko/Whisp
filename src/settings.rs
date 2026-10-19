@@ -75,6 +75,52 @@ impl Settings {
     }
 }
 
+/// A window's normal (restored) rectangle and whether it is maximized, as
+/// the `window` setting: `left,top,right,bottom,maximized`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub maximized: bool,
+}
+
+/// Smallest saved size that is taken seriously, in pixels.
+const MIN_SIDE: i32 = 100;
+
+impl Placement {
+    pub fn parse(value: &str) -> Option<Placement> {
+        let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+        let [left, top, right, bottom, maximized] = parts[..] else {
+            return None;
+        };
+        let p = Placement {
+            left: left.parse().ok()?,
+            top: top.parse().ok()?,
+            right: right.parse().ok()?,
+            bottom: bottom.parse().ok()?,
+            maximized: match maximized {
+                "1" => true,
+                "0" => false,
+                _ => return None,
+            },
+        };
+        (p.right - p.left >= MIN_SIDE && p.bottom - p.top >= MIN_SIDE).then_some(p)
+    }
+
+    pub fn format(&self) -> String {
+        format!(
+            "{},{},{},{},{}",
+            self.left,
+            self.top,
+            self.right,
+            self.bottom,
+            u8::from(self.maximized)
+        )
+    }
+}
+
 /// `key=value`, both trimmed; comments and other lines give `None`.
 fn split(line: &str) -> Option<(&str, &str)> {
     let line = line.trim();
@@ -110,6 +156,33 @@ mod tests {
         let mut empty = Settings::default();
         empty.set("paper", "grid");
         assert_eq!(empty.to_text(), "paper=grid\n");
+    }
+
+    #[test]
+    fn window_placement() {
+        let p = Placement::parse("10, -20,430,580,1").unwrap();
+        assert_eq!(
+            p,
+            Placement {
+                left: 10,
+                top: -20,
+                right: 430,
+                bottom: 580,
+                maximized: true
+            }
+        );
+        assert_eq!(Placement::parse(&p.format()), Some(p));
+        assert_eq!(p.format(), "10,-20,430,580,1");
+        for bad in [
+            "",
+            "1,2,3,4",
+            "0,0,500,500,2",
+            "0,0,50,500,0",
+            "a,0,500,500,0",
+            "0,0,500,500,0,9",
+        ] {
+            assert_eq!(Placement::parse(bad), None, "{bad}");
+        }
     }
 
     #[test]
