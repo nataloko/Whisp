@@ -23,8 +23,14 @@ pub enum Style {
     Checkbox,
     /// A checked checklist item: the box and the rest of its line.
     Checked,
-    /// Markdown syntax characters: `#`, `**`, `` ` ``, `[`, `](url)` and so on.
+    /// Markdown syntax characters that always show: code fences, `> `,
+    /// rules, escapes and an image's `!`.
     Symbol,
+    /// Markdown syntax characters that the hide symbols mode hides: heading
+    /// `#`s and the blanks after them, `**`, `*`, `_` runs, `<u>`, `</u>`,
+    /// `~~`, inline code backticks, and a link's `[` and `](url)`. They look
+    /// exactly like `Symbol` otherwise.
+    Marker,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +82,7 @@ fn rank(style: Style) -> u8 {
         Style::Code => 4,
         Style::ListMarker | Style::Checkbox => 5,
         Style::Checked => 6,
-        Style::Symbol => 7,
+        Style::Symbol | Style::Marker => 7,
     }
 }
 
@@ -141,8 +147,9 @@ fn block(c: &[char], in_fence: bool, first: bool, sp: &mut Spans) -> bool {
         // Whisp styles a list note's title line instead of as a heading.
         sp.add(0, len, Style::ListTitle);
     } else if (1..=6).contains(&hashes) && c.get(hashes).is_some_and(|&ch| is_blank(ch)) {
+        let blanks = c[hashes..].iter().take_while(|&&ch| is_blank(ch)).count();
         sp.add(0, len, Style::Heading(hashes as u8));
-        sp.add(0, hashes, Style::Symbol);
+        sp.add(0, hashes + blanks, Style::Marker);
         start = hashes;
     } else if rest.first() == Some(&'>') {
         let n = rest
@@ -240,8 +247,8 @@ fn inline(c: &[char], from: usize, sp: &mut Spans) {
                 if let Some(close) = find_run(c, i + run, '`', run) {
                     let end = close + run;
                     sp.add(i, end, Style::Code);
-                    sp.add(i, i + run, Style::Symbol);
-                    sp.add(close, end, Style::Symbol);
+                    sp.add(i, i + run, Style::Marker);
+                    sp.add(close, end, Style::Marker);
                     masked[i..end].fill(true);
                     i = end;
                 } else {
@@ -265,9 +272,11 @@ fn inline(c: &[char], from: usize, sp: &mut Spans) {
                 } else {
                     i
                 };
-                sp.add(open, i + 1, Style::Symbol);
+                // An image's `!` stays, as Whisp's link pattern leaves it out.
+                sp.add(open, i, Style::Symbol);
+                sp.add(i, i + 1, Style::Marker);
                 sp.add(i + 1, close, Style::Link);
-                sp.add(close, paren + 1, Style::Symbol);
+                sp.add(close, paren + 1, Style::Marker);
                 masked[open..=i].fill(true);
                 masked[close..=paren].fill(true);
                 i = paren + 1;
@@ -324,8 +333,8 @@ fn underline(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
             && let Some(close) = (i + 3..n).find(|&j| is(j, "</u>"))
         {
             sp.add(i, close + 4, Style::Underline);
-            sp.add(i, i + 3, Style::Symbol);
-            sp.add(close, close + 4, Style::Symbol);
+            sp.add(i, i + 3, Style::Marker);
+            sp.add(close, close + 4, Style::Marker);
             i = close + 4;
             continue;
         }
@@ -358,8 +367,8 @@ fn underline(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
         match found {
             Some((k, end)) => {
                 sp.add(i, end + k, Style::Underline);
-                sp.add(i, i + k, Style::Symbol);
-                sp.add(end, end + k, Style::Symbol);
+                sp.add(i, i + k, Style::Marker);
+                sp.add(end, end + k, Style::Marker);
                 i = end + k;
             }
             None => i += 1,
@@ -478,8 +487,8 @@ fn emphasis(c: &[char], from: usize, masked: &[bool], sp: &mut Spans) {
                 let close = runs[r].lo;
                 runs[r].lo += used;
                 sp.add(open, close + used, style);
-                sp.add(open, open + used, Style::Symbol);
-                sp.add(close, close + used, Style::Symbol);
+                sp.add(open, open + used, Style::Marker);
+                sp.add(close, close + used, Style::Marker);
                 if runs[k].lo == runs[k].hi {
                     openers.truncate(k_pos);
                 } else {
@@ -521,10 +530,10 @@ mod tests {
     fn headings() {
         let s = spans("## Title");
         assert!(s.contains(&("## Title".into(), Heading(2))));
-        assert!(s.contains(&("##".into(), Symbol)));
+        assert!(s.contains(&("## ".into(), Marker)));
         assert!(highlight("#nospace").is_empty());
         assert!(highlight("####### seven").is_empty());
-        assert!(has("###### six", "######", Symbol));
+        assert!(has("###### six", "###### ", Marker));
     }
 
     #[test]
@@ -546,7 +555,7 @@ mod tests {
         assert_eq!((bold.start, bold.end), (3, 8));
         let symbols: Vec<_> = h
             .iter()
-            .filter(|s| s.style == Symbol)
+            .filter(|s| s.style == Marker)
             .map(|s| (s.start, s.end))
             .collect();
         assert_eq!(symbols, vec![(3, 5), (6, 8)]);
@@ -559,7 +568,7 @@ mod tests {
         assert!(has("a _u_ b", "_u_", Underline));
         assert!(has("a __u__ b", "__u__", Underline));
         assert!(has("<u>x</u>", "<u>x</u>", Underline));
-        assert!(has("<u>x</u>", "</u>", Symbol));
+        assert!(has("<u>x</u>", "</u>", Marker));
         assert!(!spans("a __u__ b").iter().any(|(_, st)| *st == Bold));
         assert!(has("*i* _u_", "*i*", Italic));
         assert!(
@@ -570,7 +579,7 @@ mod tests {
         let s = spans("***both***");
         assert!(s.contains(&("**both**".into(), Bold)));
         assert!(s.contains(&("***both***".into(), Italic)));
-        assert_eq!(s.iter().filter(|(_, st)| *st == Symbol).count(), 4);
+        assert_eq!(s.iter().filter(|(_, st)| *st == Marker).count(), 4);
     }
 
     #[test]
@@ -655,11 +664,12 @@ mod tests {
     #[test]
     fn links() {
         let s = spans("see [Whisp](https://x.org/a_b_c) now");
-        assert!(s.contains(&("[".into(), Symbol)));
+        assert!(s.contains(&("[".into(), Marker)));
         assert!(s.contains(&("Whisp".into(), Link)));
-        assert!(s.contains(&("](https://x.org/a_b_c)".into(), Symbol)));
+        assert!(s.contains(&("](https://x.org/a_b_c)".into(), Marker)));
         assert!(!s.iter().any(|(_, st)| *st == Italic));
-        assert!(has("![alt](a.png)", "![", Symbol));
+        assert!(has("![alt](a.png)", "!", Symbol));
+        assert!(has("![alt](a.png)", "[", Marker));
         assert!(highlight("[not a link] (x)").is_empty());
     }
 
@@ -693,9 +703,67 @@ mod tests {
 
     #[test]
     fn symbols_come_last() {
-        let h = highlight("# **a** [b](c) `d`");
-        let first_symbol = h.iter().position(|s| s.style == Symbol).unwrap();
-        assert!(h[first_symbol..].iter().all(|s| s.style == Symbol));
+        let h = highlight("# **a** [b](c) `d` \\*\n> q");
+        let is_symbol = |s: &Span| matches!(s.style, Symbol | Marker);
+        let first_symbol = h.iter().position(is_symbol).unwrap();
+        assert!(h[first_symbol..].iter().all(is_symbol));
+        assert!(h.iter().any(|s| s.style == Symbol));
         assert_eq!(h[0].style, Heading(1));
+    }
+
+    /// The text of each span of `style`, in order.
+    fn covered(text: &str, style: Style) -> Vec<String> {
+        spans(text)
+            .into_iter()
+            .filter(|(_, st)| *st == style)
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    #[test]
+    fn hideable_markers_per_construct() {
+        assert_eq!(covered("# Title", Marker), ["# "]);
+        assert_eq!(covered("###\t  Title", Marker), ["###\t  "]);
+        assert_eq!(covered("a **b** c", Marker), ["**", "**"]);
+        assert_eq!(covered("a *i* c", Marker), ["*", "*"]);
+        assert_eq!(covered("a _u_ c", Marker), ["_", "_"]);
+        assert_eq!(covered("a __u__ c", Marker), ["__", "__"]);
+        assert_eq!(covered("a <u>u</u> c", Marker), ["<u>", "</u>"]);
+        assert_eq!(covered("a ~~s~~ c", Marker), ["~~", "~~"]);
+        assert_eq!(covered("a `c` d", Marker), ["`", "`"]);
+        assert_eq!(covered("a ``c`` d", Marker), ["``", "``"]);
+        assert_eq!(
+            covered("a [t](https://x.y) b", Marker),
+            ["[", "](https://x.y)"]
+        );
+        // An image keeps its `!`: only `[` and `](url)` hide.
+        assert_eq!(covered("![alt](a.png)", Marker), ["[", "](a.png)"]);
+        assert_eq!(covered("![alt](a.png)", Symbol), ["!"]);
+        assert_eq!(covered("***b***", Marker), ["**", "**", "*", "*"]);
+    }
+
+    #[test]
+    fn markers_that_never_hide() {
+        for text in [
+            "- item",
+            "1. item",
+            "- [ ] todo",
+            "- [x] done",
+            "\u{2610} todo",
+            "> quote",
+            "```rust",
+            "---",
+            "// comment",
+            "::date",
+            "https://example.com/a_b",
+            "\\*not italic\\*",
+            "list",
+        ] {
+            assert!(covered(text, Marker).is_empty(), "{text:?}");
+        }
+        // Inside a fence nothing is a marker either.
+        assert!(covered("```\n# h **b** `c`", Marker).is_empty());
+        assert_eq!(covered("> **b**", Symbol), ["> "]);
+        assert_eq!(covered("> **b**", Marker), ["**", "**"]);
     }
 }

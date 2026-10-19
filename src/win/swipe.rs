@@ -137,11 +137,12 @@ impl App {
                 Err(_) => return false,
             },
         };
+        let hide = self.hides_symbols(index);
         let Some(peek) = self.peek_editor() else {
             return false;
         };
         self.busy.set(true);
-        peek.load(&text, &self.theme.get());
+        peek.load(&text, &self.theme.get(), hide);
         peek.set_read_only(true);
         self.busy.set(false);
         self.peek.set(Some((side, index)));
@@ -395,7 +396,7 @@ impl App {
         // Free the old note's text.
         if let Some(previous) = self.editors[old].get() {
             self.busy.set(true);
-            previous.load("", &self.theme.get());
+            previous.load("", &self.theme.get(), false);
             previous.set_read_only(true);
             self.busy.set(false);
         }

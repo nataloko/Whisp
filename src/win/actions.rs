@@ -124,19 +124,29 @@ impl App {
     /// Ctrl+Shift+C: the whole note on the clipboard, with Windows line
     /// breaks.
     pub(super) fn copy_note(&self) {
-        let text = self.editor().text().replace('\n', "\r\n");
+        let copied = self.set_clipboard(&self.editor().text().replace('\n', "\r\n"));
+        self.show_status(if copied {
+            "Note copied"
+        } else {
+            "Could not copy the note"
+        });
+    }
+
+    /// Puts `text` on the clipboard as plain Unicode text; returns whether
+    /// it worked.
+    pub(super) fn set_clipboard(&self, text: &str) -> bool {
         let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
         let bytes = units.len() * 2;
         // SAFETY: the memory is filled while locked and handed to the
         // clipboard, which owns it once SetClipboardData succeeds.
-        let copied = unsafe {
+        unsafe {
             let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, bytes) else {
-                return;
+                return false;
             };
             let ptr = GlobalLock(mem) as *mut u16;
             if ptr.is_null() {
                 let _ = GlobalFree(Some(mem));
-                return;
+                return false;
             }
             std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
             let _ = GlobalUnlock(mem);
@@ -150,12 +160,7 @@ impl App {
                 let _ = GlobalFree(Some(mem));
             }
             copied
-        };
-        self.show_status(if copied {
-            "Note copied"
-        } else {
-            "Could not copy the note"
-        });
+        }
     }
 
     /// Ctrl+Shift+S: saves the note as a Markdown file through the Windows

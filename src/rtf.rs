@@ -2,6 +2,7 @@
 //! can load a note in one stream instead of one call per span.
 
 use std::fmt::Write as _;
+use std::ops::Range;
 
 use crate::markdown::{Span, Style};
 
@@ -64,6 +65,8 @@ pub struct Attr {
     pub color: u8,
     /// 0 for the base size, 1 to 3 for H1 to H3.
     pub heading: u8,
+    /// A hideable marker while the hide symbols mode hides it.
+    pub hidden: bool,
 }
 
 impl Default for Attr {
@@ -76,13 +79,15 @@ impl Default for Attr {
             code: false,
             color: TEXT,
             heading: 0,
+            hidden: false,
         }
     }
 }
 
 impl Attr {
-    /// Sets what `style` sets, as EM_SETCHARFORMAT with the editor's masks does.
-    fn apply(&mut self, style: Style) {
+    /// Sets what `style` sets, as EM_SETCHARFORMAT with the editor's masks
+    /// does. With `hide`, a `Style::Marker` is also hidden.
+    fn apply(&mut self, style: Style, hide: bool) {
         match style {
             Style::Heading(level) => {
                 self.bold = true;
@@ -122,18 +127,31 @@ impl Attr {
                 self.color = COMMENT;
             }
             Style::Symbol => self.color = SYMBOL,
+            Style::Marker => {
+                self.color = SYMBOL;
+                if hide {
+                    self.hidden = true;
+                }
+            }
         }
     }
 }
 
 /// Flattens spans, applied in order, into non overlapping runs that cover
-/// all `len` units: (start, end, attributes).
-pub fn runs(len: usize, spans: &[Span]) -> Vec<(usize, usize, Attr)> {
+/// all `len` units: (start, end, attributes). With `hide`, hideable
+/// markers are hidden; without it the runs look as if they were symbols.
+pub fn runs(len: usize, spans: &[Span], hide: bool) -> Vec<(usize, usize, Attr)> {
+    flatten(len, spans, |_| hide)
+}
+
+/// `runs`, asking `hide` for each span whether its markers are hidden.
+fn flatten(len: usize, spans: &[Span], hide: impl Fn(&Span) -> bool) -> Vec<(usize, usize, Attr)> {
     let mut attrs = vec![Attr::default(); len];
     for span in spans {
         let end = span.end.min(len);
+        let hide = hide(span);
         for attr in &mut attrs[span.start.min(end)..end] {
-            attr.apply(span.style);
+            attr.apply(span.style, hide);
         }
     }
     let mut runs = Vec::new();
@@ -148,8 +166,10 @@ pub fn runs(len: usize, spans: &[Span]) -> Vec<(usize, usize, Attr)> {
 }
 
 /// An RTF document for `text` (with `\n` line breaks) styled by `spans`
-/// (from `markdown::highlight` on the same text).
-pub fn document(text: &str, spans: &[Span], look: &Look) -> String {
+/// (from `markdown::highlight` on the same text). With `hide`, the hide
+/// symbols mode is on: hideable markers are hidden (`\v`), except those
+/// within that range of units, the caret's line.
+pub fn document(text: &str, spans: &[Span], look: &Look, hide: Option<Range<usize>>) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut out = String::with_capacity(units.len() + units.len() / 4 + 512);
     out.push_str(r"{\rtf1\ansi\deff0\uc1{\fonttbl{\f0\fmodern Consolas;}}{\colortbl;");
@@ -168,7 +188,11 @@ pub fn document(text: &str, spans: &[Span], look: &Look) -> String {
     }
     let _ = write!(out, r"}}\pard\plain\f0\fs{}\cf{TEXT} ", look.size);
 
-    for (start, end, attr) in runs(units.len(), spans) {
+    let hidden = |span: &Span| {
+        hide.as_ref()
+            .is_some_and(|line| span.start < line.start || span.end > line.end)
+    };
+    for (start, end, attr) in flatten(units.len(), spans, hidden) {
         let styled = attr != Attr::default();
         if styled {
             out.push('{');
@@ -177,6 +201,7 @@ pub fn document(text: &str, spans: &[Span], look: &Look) -> String {
                 (attr.italic, r"\i"),
                 (attr.strike, r"\strike"),
                 (attr.underline, r"\ul"),
+                (attr.hidden, r"\v"),
             ] {
                 if on {
                     out.push_str(word);
@@ -248,7 +273,12 @@ mod tests {
     }
 
     fn rtf(text: &str) -> String {
-        document(text, &markdown::highlight(text), &look())
+        document(text, &markdown::highlight(text), &look(), None)
+    }
+
+    /// The document with hidden markers, except on the line `reveal`.
+    fn hidden_rtf(text: &str, reveal: Range<usize>) -> String {
+        document(text, &markdown::highlight(text), &look(), Some(reveal))
     }
 
     /// The plain text of an RTF document: a small reader for what `document`
@@ -379,7 +409,7 @@ mod tests {
     fn overlapping_spans_flatten_in_order() {
         // "***both***": italic over all, bold inside, symbols on the stars.
         let text = "***both***";
-        let runs = runs(text.len(), &markdown::highlight(text));
+        let runs = runs(text.len(), &markdown::highlight(text), false);
         let bounds: Vec<_> = runs.iter().map(|r| (r.0, r.1)).collect();
         assert_eq!(bounds, [(0, 1), (1, 3), (3, 7), (7, 9), (9, 10)]);
         let both = runs[2].2;
@@ -388,7 +418,7 @@ mod tests {
         assert!(outer.italic && !outer.bold && outer.color == SYMBOL);
         assert!(runs[1].2.bold && runs[1].2.color == SYMBOL);
         // A heading's symbol keeps the heading size and boldness.
-        let runs = super::runs(4, &markdown::highlight("# ab"));
+        let runs = super::runs(4, &markdown::highlight("# ab"), false);
         assert_eq!(runs[0].2.heading, 1);
         assert!(runs[0].2.bold && runs[0].2.color == SYMBOL);
         assert_eq!(runs[1].2.color, HEADING);
@@ -397,14 +427,77 @@ mod tests {
     #[test]
     fn runs_cover_everything_once() {
         let text = "x **a** y\n\n`c`";
-        let runs = runs(text.len(), &markdown::highlight(text));
+        let runs = runs(text.len(), &markdown::highlight(text), false);
         assert_eq!(runs.first().unwrap().0, 0);
         assert_eq!(runs.last().unwrap().1, text.len());
         assert!(
             runs.windows(2)
                 .all(|w| w[0].1 == w[1].0 && w[0].2 != w[1].2)
         );
-        assert!(super::runs(0, &[]).is_empty());
+        assert!(super::runs(0, &[], false).is_empty());
+    }
+
+    #[test]
+    fn markers_look_like_symbols_when_shown() {
+        let text = "# h **b** _u_ `c` [l](u) ![i](p) > q";
+        let spans = markdown::highlight(text);
+        let shown = runs(text.len(), &spans, false);
+        assert!(shown.iter().all(|r| !r.2.hidden));
+        // The same runs as if every marker were a plain symbol.
+        let as_symbols: Vec<Span> = spans
+            .iter()
+            .map(|s| Span {
+                style: if s.style == Style::Marker {
+                    Style::Symbol
+                } else {
+                    s.style
+                },
+                ..*s
+            })
+            .collect();
+        assert_eq!(shown, runs(text.len(), &as_symbols, false));
+        assert!(!rtf(text).contains(r"\v"));
+    }
+
+    #[test]
+    fn hidden_markers() {
+        let text = "a **b** [l](u)";
+        let hidden: Vec<String> = runs(text.len(), &markdown::highlight(text), true)
+            .into_iter()
+            .filter(|r| r.2.hidden)
+            .map(|r| text[r.0..r.1].to_string())
+            .collect();
+        assert_eq!(hidden, ["**", "**", "[", "](u)"]);
+        // Hidden markers keep the symbol colour, for when they show again.
+        let runs = runs(4, &markdown::highlight("# ab"), true);
+        assert!(runs[0].2.hidden && runs[0].2.color == SYMBOL && runs[0].2.heading == 1);
+        assert!(!runs[1].2.hidden);
+        // Other symbols never hide.
+        let text = "> - [x] `` ``` ``\n---\n![i](p)";
+        let all = super::runs(text.len(), &markdown::highlight(text), true);
+        let hidden: Vec<&str> = all
+            .iter()
+            .filter(|r| r.2.hidden)
+            .map(|r| &text[r.0..r.1])
+            .collect();
+        assert_eq!(hidden, ["``", "``", "[", "](p)"]);
+    }
+
+    #[test]
+    fn document_hides_all_but_the_caret_line() {
+        let text = "**a**\n**b**";
+        // The caret on the second line, units 6 to 11.
+        let doc = hidden_rtf(text, 6..11);
+        assert_eq!(doc.matches(r"\v").count(), 2, "{doc}");
+        assert!(doc.contains(r"{\b\v\cf2 **}{\b a}{\b\v\cf2 **}"), "{doc}");
+        assert!(doc.contains(r"{\b\cf2 **}{\b b}{\b\cf2 **}"), "{doc}");
+        // The whole note on the caret line: nothing hidden.
+        assert!(!hidden_rtf(text, 0..11).contains(r"\v"));
+        // An empty last line reveals nothing.
+        assert_eq!(hidden_rtf("# h\n", 4..4).matches(r"\v").count(), 1);
+        for text in ["# T\n**b** [l](u) `c`\n_u_", "", "a\n\n"] {
+            assert_eq!(extract(&hidden_rtf(text, 0..0)), text);
+        }
     }
 
     #[test]

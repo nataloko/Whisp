@@ -7,6 +7,7 @@ mod ocr;
 mod search_ui;
 mod suggest;
 mod swipe;
+mod symbols;
 mod theme;
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -131,6 +132,9 @@ struct App {
     /// Whisp's `metadata.json` in the notes folder, as last read or written.
     /// Empty if it could not be read; writes then refuse to overwrite it.
     meta: RefCell<Metadata>,
+    /// Symbols are hidden on the empty page, in the per note scope, where
+    /// there is no file to keep the flag for yet.
+    hide_new: Cell<bool>,
 }
 
 thread_local! {
@@ -346,6 +350,7 @@ fn create(dir: PathBuf, list: Vec<(PathBuf, SystemTime)>) -> windows::core::Resu
             settings_dir,
             settings: RefCell::new(settings),
             meta: RefCell::new(meta),
+            hide_new: Cell::new(false),
         }));
         APP.with(|a| a.set(app).ok());
         actions::install_cursor_hook();
@@ -463,6 +468,11 @@ impl App {
                     && header.code == windows::Win32::UI::Controls::RichEdit::EN_SELCHANGE
                 {
                     self.selection_changed();
+                    if self.editor().hides() {
+                        // The caret may be on another line now, which shows
+                        // its symbols while the line it left hides them.
+                        self.post_restyle();
+                    }
                 }
                 return None;
             }
@@ -605,10 +615,15 @@ impl App {
         }
         self.dirty.set(true);
         self.clear_highlight();
-        // SAFETY: a timer and a posted message to our own window; restarting
-        // the timer resets its delay.
+        // SAFETY: a timer on our own window; restarting it resets its delay.
+        unsafe { SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_DELAY_MS, None) };
+        self.post_restyle();
+    }
+
+    /// Posts WM_RESTYLE, unless one is waiting already.
+    fn post_restyle(&self) {
+        // SAFETY: a posted message to our own window.
         unsafe {
-            SetTimer(Some(self.hwnd), TIMER_SAVE, SAVE_DELAY_MS, None);
             if !self.restyle_posted.replace(true)
                 && PostMessageW(Some(self.hwnd), WM_RESTYLE, WPARAM(0), LPARAM(0)).is_err()
             {
@@ -668,6 +683,7 @@ impl App {
             None => {
                 let path = notes::new_path(&self.dir);
                 notes::write_atomic(&path, &text)?;
+                self.new_note_saved(&path);
                 self.notes.borrow_mut().push(path);
                 Ok(())
             }
@@ -724,8 +740,9 @@ impl App {
                 }
             }
         };
+        let hide = self.hides_symbols(index);
         self.busy.set(true);
-        self.editor().load(&text, &self.theme.get());
+        self.editor().load(&text, &self.theme.get(), hide);
         self.busy.set(false);
         self.generation.set(self.generation.get() + 1);
         self.current.set(index);
@@ -914,6 +931,11 @@ impl App {
             VK_Z | VK_Y => {
                 self.undoing.set(true);
                 return false;
+            }
+            VK_E if !shift => self.toggle_symbols(),
+            // RichEdit may copy without the hidden symbols.
+            VK_C | VK_X | VK_INSERT if !shift && self.editor().hides() => {
+                self.copy_selection(key == VK_X);
             }
             VK_C | VK_X => return false,
             // Any other Ctrl + letter, digit or punctuation key is a RichEdit

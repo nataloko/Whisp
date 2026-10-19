@@ -5,6 +5,10 @@
 //! the lines above it: whether a code fence is open (see
 //! `markdown::highlight_line`). So after an edit only the changed lines, and
 //! the lines after them until the fence state agrees again, need parsing.
+//!
+//! In the hide symbols mode a line also depends on whether the caret is on
+//! it, which shows its hideable markers; `reveal` restyles the lines that
+//! the caret left or reached.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -22,6 +26,22 @@ pub struct Line {
     pub runs: Vec<(usize, usize, Attr)>,
 }
 
+/// Which lines hide their hideable markers (`markdown::Style::Marker`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hide {
+    /// The hide symbols mode is on.
+    pub on: bool,
+    /// The line that shows its markers all the same: the caret's.
+    pub reveal: usize,
+}
+
+impl Hide {
+    /// Whether line `k` hides its markers.
+    fn line(self, k: usize) -> bool {
+        self.on && k != self.reveal
+    }
+}
+
 /// What is kept of each line between restyles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
@@ -30,6 +50,8 @@ pub struct State {
     /// A code fence is open at the line's start, and after it.
     pub fence: bool,
     pub fence_after: bool,
+    /// It was parsed with its hideable markers hidden.
+    pub hidden: bool,
     /// Hash of the text and the runs: equal signatures look the same.
     pub signature: u64,
 }
@@ -58,13 +80,20 @@ fn text_hash(units: &[u16]) -> u64 {
     hasher.finish()
 }
 
-/// Parses one line with the fence state at its start.
-fn parse(units: &[u16], (start, len): (usize, usize), text: u64, fence: bool) -> (Line, State) {
+/// Parses one line with the fence state at its start, hiding its markers
+/// with `hidden`.
+fn parse(
+    units: &[u16],
+    (start, len): (usize, usize),
+    text: u64,
+    fence: bool,
+    hidden: bool,
+) -> (Line, State) {
     let line_units = &units[start..start + len];
     // Lone surrogates become U+FFFD, still one unit, so offsets hold.
     let (spans, fence_after) =
         markdown::highlight_line(&String::from_utf16_lossy(line_units), fence, start == 0);
-    let runs: Vec<(usize, usize, Attr)> = rtf::runs(len, &spans)
+    let runs: Vec<(usize, usize, Attr)> = rtf::runs(len, &spans, hidden)
         .into_iter()
         .filter(|r| r.2 != Attr::default())
         .collect();
@@ -75,18 +104,20 @@ fn parse(units: &[u16], (start, len): (usize, usize), text: u64, fence: bool) ->
         text,
         fence,
         fence_after,
+        hidden,
         signature: hasher.finish(),
     };
     (Line { start, len, runs }, state)
 }
 
 /// Every line of `units`, parsed.
-pub fn full(units: &[u16]) -> (Vec<State>, Vec<Line>) {
+pub fn full(units: &[u16], hide: Hide) -> (Vec<State>, Vec<Line>) {
     let mut states = Vec::new();
     let mut lines = Vec::new();
     let mut fence = false;
-    for b in bounds(units) {
-        let (line, state) = parse(units, b, text_hash(&units[b.0..b.0 + b.1]), fence);
+    for (k, b) in bounds(units).into_iter().enumerate() {
+        let text = text_hash(&units[b.0..b.0 + b.1]);
+        let (line, state) = parse(units, b, text, fence, hide.line(k));
         fence = state.fence_after;
         states.push(state);
         lines.push(line);
@@ -107,8 +138,10 @@ pub struct Update {
 
 /// The new text `units` after an edit, given the state of the old text.
 /// Lines at the start and end with unchanged text are not parsed again,
-/// unless the fence state at their start changed.
-pub fn update(old: &[State], units: &[u16]) -> Update {
+/// unless the fence state at their start changed. The lines parsed hide
+/// their markers as `hide` says; the others keep how they were, so
+/// `reveal` comes next.
+pub fn update(old: &[State], units: &[u16], hide: Hide) -> Update {
     let bounds = bounds(units);
     let texts: Vec<u64> = bounds
         .iter()
@@ -141,7 +174,7 @@ pub fn update(old: &[State], units: &[u16]) -> Update {
         if i >= n - suffix && old[old_of(i)].fence == fence {
             break;
         }
-        let (line, s) = parse(units, bounds[i], texts[i], fence);
+        let (line, s) = parse(units, bounds[i], texts[i], fence, hide.line(i));
         fence = s.fence_after;
         state.push(s);
         lines.push(line);
@@ -156,9 +189,47 @@ pub fn update(old: &[State], units: &[u16]) -> Update {
     }
 }
 
+/// Parses again the lines of `units` whose markers `hide` now hides or
+/// shows, unlike when they were parsed, and updates `state` (which must be
+/// the state of `units`). Returns the lines that look different, which are
+/// the ones to restyle; lines without hideable markers look the same.
+pub fn reveal(state: &mut [State], units: &[u16], hide: Hide) -> Vec<Line> {
+    let mut lines = Vec::new();
+    // Only needed when the mode changes or the caret changes line.
+    let mut all = None;
+    for (k, state) in state.iter_mut().enumerate() {
+        let old = *state;
+        if old.hidden == hide.line(k) {
+            continue;
+        }
+        let b = all.get_or_insert_with(|| bounds(units))[k];
+        let (line, new) = parse(units, b, old.text, old.fence, hide.line(k));
+        *state = new;
+        if new.signature != old.signature {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// The index of the line holding UTF-16 offset `offset` of `units`. An
+/// offset just before a line break is on the line the break ends.
+pub fn line_of(units: &[u16], offset: usize) -> usize {
+    units[..offset.min(units.len())]
+        .iter()
+        .filter(|&&u| is_break(u))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mode is off: every marker shows.
+    const OFF: Hide = Hide {
+        on: false,
+        reveal: 0,
+    };
 
     fn units(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()
@@ -169,10 +240,10 @@ mod tests {
     /// parsed, and that every line not parsed looks as before. Returns the
     /// parsed and edited ranges.
     fn check(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
-        let (old_state, _) = full(&units(old));
+        let (old_state, _) = full(&units(old), OFF);
         let new_units = units(new);
-        let (want_state, want_lines) = full(&new_units);
-        let update = update(&old_state, &new_units);
+        let (want_state, want_lines) = full(&new_units, OFF);
+        let update = update(&old_state, &new_units, OFF);
         assert_eq!(update.state, want_state, "{old:?} -> {new:?}");
         assert_eq!(update.lines.len(), update.parsed.len());
         for (k, line) in update.parsed.clone().zip(&update.lines) {
@@ -199,7 +270,7 @@ mod tests {
 
     #[test]
     fn splits_lines_with_relative_runs() {
-        let (_, l) = full(&units("a\r\n**b**\u{b}é😀 *i*"));
+        let (_, l) = full(&units("a\r\n**b**\u{b}é😀 *i*"), OFF);
         // \r and \n are two breaks, as RichEdit would count them.
         assert_eq!(l.len(), 4);
         assert_eq!((l[0].start, l[0].len), (0, 1));
@@ -212,14 +283,14 @@ mod tests {
         // "é😀 " is four units, so "*i*" starts at 4.
         let bounds: Vec<_> = l[3].runs.iter().map(|r| (r.0, r.1)).collect();
         assert_eq!(bounds, [(4, 5), (5, 6), (6, 7)]);
-        assert!(full(&units("")).1.len() == 1 && full(&units("a\n")).1.len() == 2);
+        assert!(full(&units(""), OFF).1.len() == 1 && full(&units("a\n"), OFF).1.len() == 2);
     }
 
     #[test]
     fn full_parse_matches_the_whole_text_highlighter() {
         let text = "# T\n```\n*a*\n```\n- [x] **b** `c`\n> q\n\u{2610} t [l](u) https://x.y";
         let u = units(text);
-        let (_, lines) = full(&u);
+        let (_, lines) = full(&u, OFF);
         let flat: Vec<_> = lines
             .iter()
             .flat_map(|l| {
@@ -228,7 +299,7 @@ mod tests {
                     .map(move |r| (l.start + r.0, l.start + r.1, r.2))
             })
             .collect();
-        let want: Vec<_> = rtf::runs(u.len(), &markdown::highlight(text))
+        let want: Vec<_> = rtf::runs(u.len(), &markdown::highlight(text), false)
             .into_iter()
             .filter(|r| r.2 != Attr::default())
             .collect();
@@ -237,14 +308,85 @@ mod tests {
 
     #[test]
     fn signatures_cover_text_and_styles() {
-        let s = full(&units("x\n*x*\nx\n*x")).0;
+        let s = full(&units("x\n*x*\nx\n*x"), OFF).0;
         assert_eq!(s[0].signature, s[2].signature);
         assert_ne!(s[0].signature, s[1].signature);
         // Same text with different styles differs too.
         assert_ne!(
-            full(&units("*a*")).0[0].signature,
-            full(&units("```\n*a*")).0[1].signature
+            full(&units("*a*"), OFF).0[0].signature,
+            full(&units("```\n*a*"), OFF).0[1].signature
         );
+    }
+
+    /// The lines of `text` restyled when `hide` changes from `from` to `to`,
+    /// checked against a full parse with `to`.
+    fn revealed(text: &str, from: Hide, to: Hide) -> Vec<usize> {
+        let u = units(text);
+        let (mut state, _) = full(&u, from);
+        let (want_state, want_lines) = full(&u, to);
+        let lines = reveal(&mut state, &u, to);
+        assert_eq!(state, want_state, "{text:?}");
+        lines
+            .iter()
+            .map(|line| {
+                let k = want_lines
+                    .iter()
+                    .position(|w| w.start == line.start)
+                    .unwrap();
+                assert_eq!(line.runs, want_lines[k].runs);
+                k
+            })
+            .collect()
+    }
+
+    fn hide(reveal: usize) -> Hide {
+        Hide { on: true, reveal }
+    }
+
+    #[test]
+    fn hiding_restyles_only_lines_with_markers() {
+        let text = "# T\nplain\n**b**\n- item\n[l](u)\n> q";
+        assert_eq!(revealed(text, OFF, hide(5)), [0, 2, 4]);
+        assert_eq!(revealed(text, hide(5), OFF), [0, 2, 4]);
+        // The caret's line keeps its markers.
+        assert_eq!(revealed(text, OFF, hide(2)), [0, 4]);
+        assert_eq!(revealed(text, OFF, OFF), [] as [usize; 0]);
+        // Inside a fence nothing hides.
+        assert_eq!(revealed("```\n**b**\n```", OFF, hide(0)), [] as [usize; 0]);
+    }
+
+    #[test]
+    fn caret_moves_restyle_two_lines() {
+        let text = "**a**\nx\n**b**\n**c**";
+        assert_eq!(revealed(text, hide(0), hide(2)), [0, 2]);
+        assert_eq!(revealed(text, hide(0), hide(1)), [0]);
+        assert_eq!(revealed(text, hide(1), hide(1)), [] as [usize; 0]);
+        let (state, _) = full(&units(text), hide(3));
+        assert!(state[0].hidden && !state[3].hidden);
+    }
+
+    #[test]
+    fn update_hides_parsed_lines_and_reveal_the_rest() {
+        let (old, _) = full(&units("**a**\n**b**"), hide(0));
+        // Enter at the end of the first line: the caret is on the new line.
+        let new = units("**a**\n\n**b**");
+        let mut update = update(&old, &new, hide(1));
+        assert_eq!(update.parsed, 1..2);
+        let lines = reveal(&mut update.state, &new, hide(1));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].start, 0);
+        assert_eq!(update.state, full(&new, hide(1)).0);
+    }
+
+    #[test]
+    fn line_of_counts_breaks() {
+        let u = units("ab\ncd\r\u{b}e");
+        assert_eq!(line_of(&u, 0), 0);
+        assert_eq!(line_of(&u, 2), 0);
+        assert_eq!(line_of(&u, 3), 1);
+        assert_eq!(line_of(&u, 6), 2);
+        assert_eq!(line_of(&u, 7), 3);
+        assert_eq!(line_of(&u, 99), 3);
     }
 
     #[test]

@@ -258,10 +258,10 @@ pub fn url_at(line: &str, column: usize) -> Option<String> {
     let u = units(line);
     let after = &u[link.end..];
     let url = if after.starts_with(&units("](")) {
-        // The URL is the "](url)" symbol span after the text.
+        // The URL is the "](url)" marker span after the text.
         let symbol = spans
             .iter()
-            .find(|s| s.style == Style::Symbol && s.start == link.end)?;
+            .find(|s| s.style == Style::Marker && s.start == link.end)?;
         String::from_utf16_lossy(&u[link.end + 2..symbol.end - 1])
     } else {
         String::from_utf16_lossy(&u[link.start..link.end])

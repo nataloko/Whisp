@@ -1,7 +1,7 @@
 //! The RichEdit control: plain text in and out, Markdown highlighting and
 //! plain text paste.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::time::Instant;
 
@@ -21,7 +21,7 @@ use windows::core::{GUID, HSTRING, IUnknown, Interface, PCWSTR, s, w};
 
 use super::canvas;
 use super::theme::Theme;
-use crate::lines::{self, Line};
+use crate::lines::{self, Hide, Line};
 use crate::lists;
 use crate::{markdown, notes, rtf};
 
@@ -37,6 +37,9 @@ pub struct Editor {
     doc: Option<ITextDocument>,
     /// The state of the lines as currently styled, for incremental restyles.
     styled: RefCell<Vec<lines::State>>,
+    /// The hide symbols mode: hideable markers are hidden, except on the
+    /// caret's line.
+    hide: Cell<bool>,
 }
 
 /// SendMessageW for RichEdit messages.
@@ -110,6 +113,7 @@ impl Editor {
                 hwnd,
                 doc,
                 styled: RefCell::new(Vec::new()),
+                hide: Cell::new(false),
             })
         }
     }
@@ -168,6 +172,7 @@ impl Editor {
     }
 
     /// The text as RichEdit stores it: UTF-16 with `\r` paragraph breaks.
+    /// Hidden text is included: GT_DEFAULT, without GT_NOHIDDENTEXT.
     pub(super) fn text_utf16(&self) -> Vec<u16> {
         let len = self.len();
         let mut buf = vec![0u16; len + 1];
@@ -197,12 +202,27 @@ impl Editor {
 
     /// Loads a note: its text and highlighting in one RTF stream, with no
     /// undo history, no change notifications and the caret at the end.
-    pub fn load(&self, text: &str, theme: &Theme) {
+    /// With `hide`, in the hide symbols mode: markers are hidden except on
+    /// the last line, where the caret goes.
+    pub fn load(&self, text: &str, theme: &Theme, hide: bool) {
+        self.hide.set(hide);
         let spans = markdown::highlight(text);
         let expected = to_cr(text);
         let look = look(theme);
-        let document = rtf::document(text, &spans, &look);
-        let (states, lines) = lines::full(&expected);
+        let last = lines::line_of(&expected, expected.len());
+        let last_start = expected
+            .iter()
+            .rposition(|&u| matches!(u, 0x0a | 0x0b | 0x0d))
+            .map_or(0, |i| i + 1);
+        let reveal = hide.then_some(last_start..expected.len());
+        let document = rtf::document(text, &spans, &look, reveal);
+        let (states, lines) = lines::full(
+            &expected,
+            Hide {
+                on: hide,
+                reveal: last,
+            },
+        );
         // SAFETY: messages without pointers, or with pointers to live locals.
         unsafe {
             let mask = send(self.hwnd, EM_SETEVENTMASK, 0, 0);
@@ -235,7 +255,8 @@ impl Editor {
         }
     }
 
-    /// Whether the editor holds exactly `expected` (UTF-16, `\r` breaks).
+    /// Whether the editor holds exactly `expected` (UTF-16, `\r` breaks),
+    /// hidden text included.
     fn has_text(&self, expected: &[u16]) -> bool {
         let actual = self.text_utf16();
         if actual == expected {
@@ -309,12 +330,20 @@ impl Editor {
     /// edited line become `☐` and `☑`. That is a text change of its own:
     /// it returns true without restyling, and the caller treats it as an
     /// edit, which restyles again.
+    ///
+    /// In the hide symbols mode this also shows the markers of the caret's
+    /// line and hides those of the line it left, so it runs after
+    /// selection changes too.
     pub fn restyle_changes(&self, theme: &Theme, convert: bool) -> bool {
         let started = Instant::now();
         let units = self.text_utf16();
+        let hide = Hide {
+            on: self.hide.get(),
+            reveal: lines::line_of(&units, self.caret()),
+        };
         // Parses only the edited lines, and the lines after them whose code
         // fence state changed.
-        let update = lines::update(&self.styled.borrow(), &units);
+        let mut update = lines::update(&self.styled.borrow(), &units, hide);
         let edited_has_box = update.edited.clone().any(|k| {
             let line = &update.lines[k - update.parsed.start];
             units[line.start..line.start + line.len].contains(&u16::from(b'['))
@@ -330,17 +359,47 @@ impl Editor {
                 return true;
             }
         }
+        // Then the lines the caret left or reached, or all of them when the
+        // mode changed.
+        let revealed = lines::reveal(&mut update.state, &units, hide);
+        let restyled = update.lines.len() + revealed.len();
+        update.lines.extend(revealed);
         let runs = self.style_lines(&update.lines, &look(theme));
         let parsed = update.parsed.len();
         *self.styled.borrow_mut() = update.state;
         let report = format!(
-            "whisp: restyle {parsed} lines, {parsed} parsed of {}, {runs} runs, {:.2} ms\n",
+            "whisp: restyle {restyled} lines, {parsed} parsed of {}, {runs} runs, {:.2} ms\n",
             self.styled.borrow().len(),
             started.elapsed().as_secs_f64() * 1000.0
         );
         // SAFETY: `report` outlives the call.
         unsafe { OutputDebugStringW(&HSTRING::from(report)) };
         false
+    }
+
+    /// Whether the hide symbols mode is on.
+    pub fn hides(&self) -> bool {
+        self.hide.get()
+    }
+
+    /// Turns the hide symbols mode on or off, restyling only the lines
+    /// that look different, so the undo history is kept.
+    pub fn set_hide(&self, theme: &Theme, on: bool) {
+        self.hide.set(on);
+        self.restyle_changes(theme, false);
+    }
+
+    /// The selection's active end: where the caret is drawn and where
+    /// Shift with an arrow key moves.
+    fn caret(&self) -> usize {
+        let (start, end) = self.selection();
+        // SAFETY: plain TOM calls on the document of our own control.
+        let start_active = self.doc.as_ref().is_some_and(|doc| unsafe {
+            doc.GetSelection()
+                .and_then(|sel| sel.GetFlags())
+                .is_ok_and(|flags| flags & tomSelStartActive.0 != 0)
+        });
+        if start_active { start } else { end }
     }
 
     /// The selection as UTF-16 offsets, start first.
@@ -442,7 +501,8 @@ impl Editor {
         (top, bottom)
     }
 
-    /// The text from `from` to `to` (UTF-16 offsets, clamped).
+    /// The text from `from` to `to` (UTF-16 offsets, clamped), hidden text
+    /// included: EM_GETTEXTRANGE copies every character of the range.
     pub(super) fn text_range(&self, from: usize, to: usize) -> Vec<u16> {
         let to = to.min(self.len());
         let from = from.min(to);
@@ -487,8 +547,8 @@ impl Editor {
     }
 
     /// Restyles everything after a theme or DPI change by reloading the text
-    /// as RTF, keeping the selection and scroll position. This clears the
-    /// undo history.
+    /// as RTF, keeping the selection, scroll position and hide symbols mode.
+    /// This clears the undo history.
     pub fn restyle(&self, theme: &Theme) {
         let text = self.text();
         let mut sel = CHARRANGE::default();
@@ -502,9 +562,13 @@ impl Editor {
                 0,
                 &mut scroll as *mut _ as isize,
             );
-            self.load(&text, theme);
+            self.load(&text, theme, self.hide.get());
             send(self.hwnd, EM_EXSETSEL, 0, &sel as *const _ as isize);
             send(self.hwnd, EM_SETSCROLLPOS, 0, &scroll as *const _ as isize);
+        }
+        if self.hide.get() {
+            // `load` showed the last line's markers; now the caret's instead.
+            self.restyle_changes(theme, false);
         }
     }
 
@@ -553,7 +617,8 @@ impl Editor {
             | CFM_ITALIC
             | CFM_UNDERLINE
             | CFM_STRIKEOUT
-            | CFM_BACKCOLOR;
+            | CFM_BACKCOLOR
+            | CFM_HIDDEN;
         cf.Base.dwEffects = CFE_AUTOBACKCOLOR;
         // Rounded to half points like the RTF and TOM sizes.
         cf.Base.yHeight = look(theme).size as i32 * 10;
@@ -756,6 +821,7 @@ fn reset(font: &ITextFont, look: &rtf::Look) {
         let _ = font.SetForeColor(colorref(look.text));
         let _ = font.SetBackColor(tomAutoColor.0);
         let _ = font.SetSize(points(look.size));
+        let _ = font.SetHidden(tomFalse.0);
     }
 }
 
@@ -783,6 +849,9 @@ fn apply(font: &ITextFont, attr: rtf::Attr, look: &rtf::Look) {
         }
         if attr.heading > 0 {
             let _ = font.SetSize(points(look.heading_sizes[usize::from(attr.heading) - 1]));
+        }
+        if attr.hidden {
+            let _ = font.SetHidden(tomTrue.0);
         }
     }
 }
